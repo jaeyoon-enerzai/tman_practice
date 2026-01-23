@@ -2,12 +2,15 @@
 #include <cstdint>
 #include <vector>
 #include <fstream>
+#include "QnnLog.h"
+#include "QnnTypes.h"
 #include "qnn_device.h"
 #include "qnn_dynload.h"
 #include "qnn_backend.h"
 #include "qnn_context.h"
 #include "qnn_graph.h"
 #include "qnn_tensor.h"
+#include "qnn_log.h"
 
 static Qnn_OpConfig_t MakeAddOp(const std::string& name,
                                const char* package,
@@ -59,8 +62,16 @@ int main(int argc, char** argv) {
     std::cout << "QNN backend loaded: backendId= " << qnn.Backend()->backendId << "\n";
     std::cout << "QNN system loaded: systemId= " << qnn.System() << "\n";
     
+    Qnn_LogHandle_t logHandle = nullptr;
+    if (!CreateQnnLogger(qnn.Backend(), &logHandle, QNN_LOG_LEVEL_VERBOSE)) {
+        std::cerr << "Failed to create QNN logger (continuing without logger)\n";
+        return -1;
+    } else {
+        std::cout << "QNN logger created. logHandle=" << logHandle << "\n";
+    }
+
     QnnBackendRuntime backend;
-    if (!backend.Create(qnn.Backend(), /*logger_handler=*/nullptr)){
+    if (!backend.Create(qnn.Backend(), /*logger_handler=*/logHandle)){
         std::cerr << "backendCreate failed\n";
         return -1;
     }
@@ -70,7 +81,7 @@ int main(int argc, char** argv) {
     // backend.RegisterOpPackage("libQnnTMANOpPackage.so", "TMANOpPackageInterfaceProvider", "HTP");
 
     QnnDeviceRuntime device;
-    if(!device.Create(qnn.Backend(), /*logger_handler=*/nullptr)){
+    if(!device.Create(qnn.Backend(), /*logger_handler=*/logHandle)){
         std::cerr << "deviceCreate failed\n";
         return -1;
     }
@@ -93,10 +104,10 @@ int main(int argc, char** argv) {
     std::cout << "graphCreate OK. graph_handle=" << graph.Handle() << "\n";
 
     // x,y,out 텐서 1D [4] float32 예시
-    std::vector<uint32_t> dims{4};
-    QnnTensor x("x",   QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, dims);
-    QnnTensor y("y",   QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, dims);
-    QnnTensor out("o", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, dims);
+    std::vector<uint32_t> dims{1,8};
+    QnnTensor x("x",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, dims);
+    QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, dims);
+    QnnTensor out("o", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, dims);
 
 std::cout
         << "x id=" << QNN_TENSOR_VER_PTR(*x.Tensor())->id
@@ -122,20 +133,25 @@ std::cout
         << " o id=" << QNN_TENSOR_VER_PTR(*out.Tensor())->id
         << "\n";
 
-    if(!backend.ValidateOpConfig(add)) return -1;
+    if(!backend.ValidateOpConfig(add)){
+        std::cout << "Something is wrong in OpConfig\n";
+        return -1;
+    }
+
+    std::cout << "VALIDATED\n";
 
     if (!graph.AddNode(add)) return -1;
     std::cout << "Added Op Node\n";
-    // if (!graph.Finalize()) return -1;
+    if (!graph.Finalize()) return -1;
 
-    // std::vector<uint8_t> blob;
-    // if (!ctx.GetBinary(blob)) return -1;
+    std::vector<uint8_t> blob;
+    if (!ctx.GetBinary(blob)) return -1;
 
-    // std::ofstream ofs("add_graph.bin", std::ios::binary);
-    // ofs.write(reinterpret_cast<const char*>(blob.data()), blob.size());
-    // ofs.close();
+    std::ofstream ofs("add_graph.bin", std::ios::binary);
+    ofs.write(reinterpret_cast<const char*>(blob.data()), blob.size());
+    ofs.close();
 
-    // std::cout << "OK: wrote context binary add_graph.bin (" << blob.size() << " bytes)\n";
+    std::cout << "OK: wrote context binary add_graph.bin (" << blob.size() << " bytes)\n";
     // scope 종료 시 backend Destroy
     return 0;
     

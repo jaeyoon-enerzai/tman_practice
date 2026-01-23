@@ -40,7 +40,7 @@ bool QnnDeviceRuntime::MakeConfig(std::vector<const QnnDevice_Config_t*>& out_cf
   p = alloc_htp_custom();
   p->option = QNN_HTP_DEVICE_CONFIG_OPTION_ARCH;
   p->arch.deviceId = 0;
-  p->arch.arch = QNN_HTP_DEVICE_ARCH_V79;
+  p->arch.arch = QNN_HTP_DEVICE_ARCH_V81;
   // p->arch.arch = static_cast<QnnHtpDevice_Arch_t>(ARCH);
   device_custom_config.push_back(static_cast<QnnDevice_CustomConfig_t>(p));
 
@@ -48,8 +48,8 @@ bool QnnDeviceRuntime::MakeConfig(std::vector<const QnnDevice_Config_t*>& out_cf
   p = alloc_htp_custom();
   p->option = QNN_HTP_DEVICE_CONFIG_OPTION_SOC;
   // p->socModel = static_cast<uint32_t>(SOC);
-  // p->socModel = QNN_SOC_MODEL_SM8850;
-  p->socModel = QNN_SOC_MODEL_SM8750;
+  p->socModel = QNN_SOC_MODEL_SM8850;
+  // p->socModel = QNN_SOC_MODEL_SM8750;
   device_custom_config.push_back(static_cast<QnnDevice_CustomConfig_t>(p));
   
 
