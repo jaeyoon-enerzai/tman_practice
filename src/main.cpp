@@ -1,5 +1,6 @@
 #include <iostream>
 #include <cstdint>
+#include <random>
 #include <vector>
 #include <fstream>
 #include "QnnLog.h"
@@ -121,11 +122,22 @@ int main(int argc, char** argv) {
 
     std::cout << "graphCreate OK. graph_handle=" << graph.Handle() << "\n";
 
+    // randomize static tensor data
+    unsigned int N = 8;
+    std::mt19937 rng(12345);
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    unsigned int bytes = static_cast<uint32_t>(N * sizeof(float));
+
+    float* static_c = new float[N];
+    for (size_t i=0; i< N; i++) static_c[i] = dist(rng);
+
+
     // x,y,out 텐서 1D [4] float32 예시
-    std::vector<uint32_t> dims{1,8};
+    std::vector<uint32_t> dims{1,N};
     QnnTensor x("x",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, dims);
     QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, dims);
     QnnTensor z("z",   QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, dims);
+    QnnTensor c("c", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, dims, nullptr, bytes, static_cast<const void*>(static_c));
     QnnTensor out("o", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, dims);
 
 std::cout
@@ -138,6 +150,7 @@ std::cout
     if (!graph.EnsureTensorInGraph(x)) return -1;
     if (!graph.EnsureTensorInGraph(y)) return -1;
     if (!graph.EnsureTensorInGraph(z)) return -1;
+    if (!graph.EnsureTensorInGraph(c)) return -1;
     if (!graph.EnsureTensorInGraph(out)) return -1;
 
     // executorch가 쓰는 값으로 맞춰라 (아래는 흔한 예시 문자열)
@@ -146,7 +159,7 @@ std::cout
     std::string add_name = "add0";
 
     OpHolder add0 = MakeAddOpHolder(add_name, kPackage, kType, x, y, z);
-    OpHolder add1 = MakeAddOpHolder("add1", kPackage, kType, x, z, out);
+    OpHolder add1 = MakeAddOpHolder("add1", kPackage, kType, c, z, out);
 
     std::cout
         << "x id=" << QNN_TENSOR_VER_PTR(*x.Tensor())->id
@@ -184,6 +197,9 @@ std::cout
     ofs.close();
 
     std::cout << "OK: wrote context binary add_graph.bin (" << blob.size() << " bytes)\n";
+
+    delete[] static_c;
+
     // scope 종료 시 backend Destroy
     return 0;
     

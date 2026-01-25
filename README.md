@@ -7,9 +7,12 @@
 - Note : You should not use non-defined SOC enum. Our target device was QCS6490 but there was no enum for it. I saw in executorch, there is a enum for QCS6490 and thought that I might be able to apply that enum number. But, it seems not. If one does like that, it seems taht SOC number is not recognized and goes fallback to some default SOC which lead to not supporting FP16 error.
 
 ## Step2 - add one additional op on the graph
-- Which type of tensor should we use it? APP READ/WRITE? or NATIVE?
+- Which type of tensor should we use it? 
+  - APP READ/WRITE for graph input/output
+  - NATIVE for intermediate tensor
 
 ## Step3 - add an op which needs static parameter into the graph
+- z = x+y & out = x + c(static)
 
 ## Step4 - add matmul op into the graph. One input must be an intermediate tensor
 
@@ -25,3 +28,5 @@
 
 ## Step10 - Add a customized op package
 - see QnnBackendCommon.cpp
+
+## Step11 - Visualize the graph
