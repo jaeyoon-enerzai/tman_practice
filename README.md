@@ -22,3 +22,6 @@
 ## Step8 - Add a profiler
 
 ## Step9 - Add a quantization
+
+## Step10 - Add a customized op package
+- see QnnBackendCommon.cpp
