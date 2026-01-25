@@ -15,6 +15,7 @@
 - z = x+y & out = x + c(static)
 
 ## Step4 - add matmul op into the graph. One input must be an intermediate tensor
+- z1 = x+y & z2 = x + c (static) & out = z1 * z2
 
 ## Step5 - add memory manager
 

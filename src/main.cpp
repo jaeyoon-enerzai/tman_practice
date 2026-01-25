@@ -43,7 +43,9 @@ struct OpHolder {
   }
 };
 
-static OpHolder MakeAddOpHolder(const std::string& name,
+
+
+static OpHolder MakeOpHolder(const std::string& name,
                                 const char* package,
                                 const char* type,
                                 const QnnTensor& x,
@@ -128,15 +130,16 @@ int main(int argc, char** argv) {
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     unsigned int bytes = static_cast<uint32_t>(N * sizeof(float));
 
-    float* static_c = new float[N];
-    for (size_t i=0; i< N; i++) static_c[i] = dist(rng);
+    float* static_c = new float[N*N];
+    for (size_t i=0; i< N*N; i++) static_c[i] = dist(rng);
 
 
     // x,y,out 텐서 1D [4] float32 예시
-    std::vector<uint32_t> dims{1,N};
+    std::vector<uint32_t> dims{N,N};
     QnnTensor x("x",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, dims);
     QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, dims);
-    QnnTensor z("z",   QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, dims);
+    QnnTensor z1("z1",   QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, dims);
+    QnnTensor z2("z2",   QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, dims);
     QnnTensor c("c", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, dims, nullptr, bytes, static_cast<const void*>(static_c));
     QnnTensor out("o", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, dims);
 
@@ -149,7 +152,8 @@ std::cout
 
     if (!graph.EnsureTensorInGraph(x)) return -1;
     if (!graph.EnsureTensorInGraph(y)) return -1;
-    if (!graph.EnsureTensorInGraph(z)) return -1;
+    if (!graph.EnsureTensorInGraph(z1)) return -1;
+    if (!graph.EnsureTensorInGraph(z2)) return -1;
     if (!graph.EnsureTensorInGraph(c)) return -1;
     if (!graph.EnsureTensorInGraph(out)) return -1;
 
@@ -158,8 +162,9 @@ std::cout
     const char* kType    = "ElementWiseAdd";
     std::string add_name = "add0";
 
-    OpHolder add0 = MakeAddOpHolder(add_name, kPackage, kType, x, y, z);
-    OpHolder add1 = MakeAddOpHolder("add1", kPackage, kType, c, z, out);
+    OpHolder add0 = MakeOpHolder(add_name, kPackage, kType, x, y, z1);
+    OpHolder add1 = MakeOpHolder("add1", kPackage, kType, c, x, z2);
+    OpHolder mm0  = MakeOpHolder("mm0", kPackage, "MatMul", z1, z2, out);
 
     std::cout
         << "x id=" << QNN_TENSOR_VER_PTR(*x.Tensor())->id
@@ -185,7 +190,18 @@ std::cout
     std::cout << "VALIDATED add1\n";
 
     if (!graph.AddNode(add1.cfg)) return -1;
-    std::cout << "Added add1 Op Node\n";
+    std::cout << "Added add10 Op Node\n";
+
+    if(!backend.ValidateOpConfig(mm0.cfg)){
+        std::cout << "Something is wrong in OpConfig\n";
+        return -1;
+    }
+
+    std::cout << "VALIDATED mm0\n";
+
+    if (!graph.AddNode(mm0.cfg)) return -1;
+    std::cout << "Added mm0 Op Node\n";
+
 
     if (!graph.Finalize()) return -1;
 
