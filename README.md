@@ -17,17 +17,20 @@
 ## Step4 - add matmul op into the graph. One input must be an intermediate tensor
 - z1 = x+y & z2 = x + c (static) & out = z1 * z2
 
-## Step5 - add memory manager
+## Step5 - add one transformer block with weight being transformed. without kv-cache
 
-## Step6 - add one transformer block with weight being transformed. add kv-cache
+## Step6 - execute the graph and check the result value
 
-## Step7 - execute the graph and check the result value
+## Step7 - Add a shared buffer for kv cache - see MemoryManager
 
 ## Step8 - Add a profiler
 
-## Step9 - Add a quantization
+## Step9 - Add PreRegister
 
-## Step10 - Add a customized op package
+## Step10 - Add a quantization
+- Blockwise config
+
+## Step11 - Add a customized op package
 - see QnnBackendCommon.cpp
 
-## Step11 - Visualize the graph
+## Step12 - Visualize the graph
