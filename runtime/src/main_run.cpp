@@ -8,6 +8,7 @@
 #include <vector>
 #include <algorithm>
 
+#include "QnnCommon.h"
 #include "QnnLog.h"
 #include "QnnTypes.h"
 #include "qnn_device.h"
@@ -15,6 +16,7 @@
 #include "qnn_backend.h"
 #include "qnn_context.h"
 #include "qnn_graph.h"
+#include "qnn_sharedbuffer.h"
 #include "qnn_tensor.h"
 #include "qnn_backendcache.h"
 #include "qnn_mem_manager.h"
@@ -167,7 +169,8 @@ int main(int argc, char** argv){
 
     std::cout << "graphCreate OK. graph_handle=" << graph.Handle() << "\n";
 
-    QnnMemManagerRuntime memory;
+    QnnMemManagerRuntime mem;
+    mem.Init(qnn.Backend(), &ctx);
 
     std::vector<Qnn_Tensor_t> input_metas = backendcache.GetGraphInputs(graph_name);
     std::vector<Qnn_Tensor_t> output_metas = backendcache.GetGraphOutputs(graph_name);
@@ -182,9 +185,9 @@ int main(int argc, char** argv){
     }
 
     // ===== 4) host-side buffers 준비 (random input) =====
-    // RAW 실행이므로 clientBuf.data에 직접 포인터를 채운다.
-    // (shared buffer/등록은 다음 단계에서 붙이면 됨)
-
+    auto & sb = SharedBuffer::Instance();
+    SharedBuffer::Arena arena;
+    
     auto tensor_bytes = [](const Qnn_Tensor_t& t) -> size_t {
         // 보통 metadata에 clientBuf.dataSize가 들어있음
         // 없으면 dims * dtype size로 계산해야 함
@@ -222,9 +225,16 @@ int main(int argc, char** argv){
     };
 
     // input buffers
-    std::vector<std::vector<uint8_t>> input_bufs(input_metas.size());
+    std::vector<void*> input_ptrs(input_metas.size(), nullptr);
+    std::vector<Qnn_MemHandle_t> input_handles(input_metas.size(), nullptr);
     // output buffers
     std::vector<std::vector<uint8_t>> output_bufs(output_metas.size());
+
+    // 대충 크게 alloc
+    if (!sb.ArenaCreate(arena, 4000, 64)){
+        std::cerr << "ArenaCreate failed\n";
+        return -1;
+    }
 
     // random 생성기
     std::mt19937 rng(12345);
@@ -233,22 +243,26 @@ int main(int argc, char** argv){
     for (size_t i = 0; i < input_metas.size(); ++i) {
         auto* tv = QNN_TENSOR_VER_PTR(input_metas[i]);
         size_t bytes = tv->clientBuf.dataSize ? tv->clientBuf.dataSize : calc_bytes_from_meta(input_metas[i]);
-        input_bufs[i].resize(bytes);
+        
+        void* ptr = nullptr;
+        Qnn_MemHandle_t h = nullptr;
+        if(!mem.RegisterTensorInSharedArena(sb, arena, input_metas[i], bytes, 64, &ptr, &h)){
+            std::cerr << "RegisterTensorInSharedArena failed\n";
+            return -1;
+        }
 
         // 지금은 float32 입력만 랜덤으로 채우자 (네 모델이 fp32면 OK)
         if (tv->dataType == QNN_DATATYPE_FLOAT_32) {
-            float* p = reinterpret_cast<float*>(input_bufs[i].data());
+            float* p = reinterpret_cast<float*>(ptr);
             size_t n = bytes / sizeof(float);
             for (size_t k = 0; k < n; ++k) p[k] = dist(rng);
         } else {
             // 다른 dtype은 일단 0으로
             std::cerr << "Should not reach here\n";
-            std::memset(input_bufs[i].data(), 0, bytes);
         }
 
-        tv->memType = QNN_TENSORMEMTYPE_RAW;
-        tv->clientBuf.data = input_bufs[i].data();
-        tv->clientBuf.dataSize = bytes;
+        input_ptrs[i] = ptr;
+        input_handles[i] = h;
 
         std::cout << "Input[" << i << "] name=" << tv->name
                   << " bytes=" << bytes
@@ -271,6 +285,20 @@ int main(int argc, char** argv){
                   << " dtype=" << tv->dataType
                   << " rank=" << tv->rank << "\n";
     }
+
+    for (size_t i = 0; i < input_metas.size(); ++i) {
+        if (input_metas[i].version == QNN_TENSOR_VERSION_1) {
+            std::cout << "I["<<i<<"] v1 name=" << input_metas[i].v1.name
+                    << " memType=" << input_metas[i].v1.memType
+                    << " memHandle=" << input_metas[i].v1.memHandle << "\n";
+        } else {
+            auto* tv = QNN_TENSOR_VER_PTR(input_metas[i]);
+            std::cout << "I["<<i<<"] v2 name=" << tv->name
+                    << " memType=" << tv->memType
+                    << " memHandle=" << tv->memHandle << "\n";
+        }
+        }
+
 
     // ===== 5) execute =====
     // QnnGraphRuntime에 Execute 함수가 없다면 be_->graphExecute를 직접 호출해도 됨
@@ -331,10 +359,10 @@ int main(int argc, char** argv){
     v.resize(B*L*D);
     attn.resize(B*L*L);
     out.resize(B*L*D);
-    batch_matmul_f32(reinterpret_cast<const float*>(input_bufs[0].data()), static_cast<const float*>(static_q.data()), q.data(), B, L, C, D, 1, true);
-    batch_matmul_f32(reinterpret_cast<const float*>(input_bufs[0].data()), static_cast<const float*>(static_k.data()), k.data(), B, L, C, D, 1, true);
-    batch_matmul_f32(static_cast<const float*>(static_v.data()), reinterpret_cast<const float*>(input_bufs[1].data()), wv.data(), 1, D, D, C, 1, false);
-    batch_matmul_f32(reinterpret_cast<const float*>(input_bufs[0].data()), static_cast<const float*>(wv.data()), v.data(), B, L, C, D, 1, true);
+    batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(static_q.data()), q.data(), B, L, C, D, 1, true);
+    batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(static_k.data()), k.data(), B, L, C, D, 1, true);
+    batch_matmul_f32(static_cast<const float*>(static_v.data()), reinterpret_cast<const float*>(input_ptrs[1]), wv.data(), 1, D, D, C, 1, false);
+    batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(wv.data()), v.data(), B, L, C, D, 1, true);
     batch_matmul_f32(static_cast<const float*>(q.data()), static_cast<const float*>(k.data()), attn.data(), B, L, D, L, B, true);
     batch_matmul_f32(static_cast<const float*>(attn.data()), static_cast<const float*>(v.data()), out.data(), B, L, L, D, B, false);
 
@@ -345,6 +373,8 @@ int main(int argc, char** argv){
     for (size_t k = 0; k < show; ++k) {
         std::cout << out[k] << (k + 1 == show ? "\n" : ", ");
     }
+
+    sb.ArenaDestroy(arena);
 
     std::cout << "[QNN] Done.\n";
     return 0;

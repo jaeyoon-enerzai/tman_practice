@@ -9,10 +9,12 @@
 #include "QnnCommon.h"
 
 #include "HTP/QnnHtpMem.h"
+#include "qnn_sharedbuffer.h"
 #include "qnn_tensor.h"
 #include "qnn_context.h"
 
 class QnnConextRuntime;
+class SharedBuffer;
 
 class QnnMemManagerRuntime{
     public:
@@ -44,10 +46,18 @@ class QnnMemManagerRuntime{
 
     void DeRegisterAll();
 
+    // out_ptr : host에서 접근할 pointer
+    // out_handle : memRegister 결과 핸들
+    bool RegisterTensorInSharedArena(
+        SharedBuffer& sb, SharedBuffer::Arena& arena,
+        Qnn_Tensor_t& tensor_meta, size_t tensor_bytes,
+        size_t alignment, void** out_ptr, Qnn_MemHandle_t* out_handle, size_t* out_offset = nullptr);
+
     private:
         const QnnInterface_t* be_{nullptr};
         QnnContextRuntime* ctx_{nullptr};
 
     std::unordered_map<Qnn_MemHandle_t, void*> registered_;
+    std::vector<std::unique_ptr<QnnMemHtp_Descriptor_t>> htp_desc_storage_;
 
 };
