@@ -1,3 +1,5 @@
 build
 .vscode
 *.bin
+build_aot
+build_runtime

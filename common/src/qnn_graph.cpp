@@ -1,4 +1,5 @@
 #include "qnn_graph.h"
+#include "QnnCommon.h"
 #include "QnnGraph.h"
 #include <cstddef>
 
@@ -12,8 +13,8 @@ static inline bool CheckQnnOk(Qnn_ErrorHandle_t err, const char* what) {
 
 bool QnnGraphRuntime::Create(const QnnInterface_t* be_iface,
                             Qnn_ContextHandle_t ctx,
-                            const std::string& graph_name,
-                          const QnnGraph_Config_t** cfg) {
+                            const std::string& graph_name
+                          ) {
   if (!be_iface || !ctx) {
     std::cerr << "[QNN] Graph Create: be_iface or ctx is null\n";
     return false;
@@ -26,6 +27,15 @@ bool QnnGraphRuntime::Create(const QnnInterface_t* be_iface,
   name_ = graph_name;
 
   auto& api = be_->QNN_INTERFACE_VER_NAME;
+
+  Qnn_ErrorHandle_t err = QNN_SUCCESS;
+
+  if(restore_mode_){
+    err = api.graphRetrieve(ctx_, name_.c_str(), &graph_);
+
+    // TODO - profiler (see QnnGraphCommon.cpp - L69)
+    return CheckQnnOk(err, "graphRetrieve");
+  }
 
   std::vector<const QnnGraph_Config_t*> cfg_ptrs;
   cfg_ptrs.clear();
@@ -48,11 +58,10 @@ bool QnnGraphRuntime::Create(const QnnInterface_t* be_iface,
       cfg_cptr ? const_cast<const QnnGraph_Config_t**>(cfg_cptr) : nullptr;
 
   // Graph-Compilation - graph retrieve는 나중 TODO
-  Qnn_ErrorHandle_t err = api.graphCreate(
+  err = api.graphCreate(
       ctx_,
       name_.c_str(),
-      // cfg_pp,
-      nullptr,
+      cfg_pp,
       &graph_);
 
   return CheckQnnOk(err, "graphCreate");

@@ -40,8 +40,8 @@ QcomChipset SOC = QcomChipset::QCS6490;
 // QcomChipset SOC = QcomChipset::SM8750;
 uint32_t vtcmSize = 2;
 // uint32_t vtcmSize = 8;
-HtpArch ARCH = HtpArch::V68;
-// HtpArch ARCH = HtpArch::V73;
+// HtpArch ARCH = HtpArch::V68;
+HtpArch ARCH = HtpArch::V73; // SM8550P
 
 
     const QnnInterface_t* be_{nullptr};

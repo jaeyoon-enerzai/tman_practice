@@ -3,6 +3,9 @@
 #include "QnnDevice.h"
 
 std::vector<QnnDevice_PlatformInfo_t*> QnnDevicePlatformInfoRuntime::CreateDevicePlatformInfo(){
+#if defined(__arch64__)
+    return {};
+#else
     std::vector<QnnDevice_PlatformInfo_t*> ret;
     QnnDevice_PlatformInfo_t* p_platform_info = nullptr;
     QnnDevice_HardwareDeviceInfo_t* p_hw_device_info = nullptr;
@@ -48,4 +51,5 @@ std::vector<QnnDevice_PlatformInfo_t*> QnnDevicePlatformInfoRuntime::CreateDevic
     ret.push_back(p_platform_info);
 
     return ret;
+#endif
 }

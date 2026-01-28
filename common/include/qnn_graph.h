@@ -30,10 +30,11 @@ public:
   QnnGraphRuntime(const QnnGraphRuntime&) = delete;
   QnnGraphRuntime& operator=(const QnnGraphRuntime&) = delete;
 
+  void SetRestoreMode(bool v) { restore_mode_ = v; }
+
   bool Create(const QnnInterface_t* be_iface,
               Qnn_ContextHandle_t ctx,
-              const std::string& graph_name,
-              const QnnGraph_Config_t** cfg=nullptr);
+              const std::string& graph_name);
 
   void Destroy();
 
@@ -54,4 +55,6 @@ private:
   std::string name_;
   std::unique_ptr<QnnHtpGraphCustomConfigRuntime> htp_graph_cfg_;
   std::vector<QnnGraph_Config_t> graph_cfg_storage_;
+
+  bool restore_mode_{false};
 };

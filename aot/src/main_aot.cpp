@@ -3,6 +3,8 @@
 #include <random>
 #include <sys/types.h>
 #include <vector>
+#include <cstddef>
+#include <string>
 #include <fstream>
 #include "QnnLog.h"
 #include "QnnTypes.h"
@@ -13,6 +15,20 @@
 #include "qnn_graph.h"
 #include "qnn_tensor.h"
 #include "qnn_log.h"
+
+static bool save_f32_raw(const std::string& path, const float* data, size_t numel) {
+  std::ofstream out(path, std::ios::binary);
+  if (!out.is_open()) {
+    std::cerr << "Failed to open for write: " << path << "\n";
+    return false;
+  }
+  out.write(reinterpret_cast<const char*>(data), sizeof(float) * numel);
+  if (!out.good()) {
+    std::cerr << "Write failed: " << path << "\n";
+    return false;
+  }
+  return true;
+}
 
 struct OpHolder {
   std::string name_store;
@@ -135,7 +151,8 @@ int main(int argc, char** argv) {
     std::cout << "deviceCreate OK\n";
 
     QnnContextRuntime ctx;
-    if(!ctx.Create(qnn.Backend(), backend.Handle(), device.Handle(), /*cfg=*/nullptr)){
+    // ctx.SetWeightSharing(true);
+    if(!ctx.Create(qnn.Backend(), backend.Handle(), device.Handle())){
         std::cerr << "contextCreate failed\n";
         return -1;
     }
@@ -143,7 +160,8 @@ int main(int argc, char** argv) {
     std::cout << "contextCreate OK\n";
 
     QnnGraphRuntime graph;
-    if (!graph.Create(qnn.Backend(), ctx.Handle(), "empty_graph", /*cfg=*/nullptr)) {
+    graph.SetRestoreMode(false);
+    if (!graph.Create(qnn.Backend(), ctx.Handle(), "empty_graph")) {
         std::cerr << "graphCreate failed\n";
         return -1;
     }
@@ -166,6 +184,10 @@ int main(int argc, char** argv) {
     float* static_k = new float[D*C];
     for (size_t i=0; i< D*C; i++) static_k[i] = dist(rng);
 
+    // save static tensor
+    save_f32_raw("static_v.bin",static_cast<const float*>(static_v), D*D);
+    save_f32_raw("static_q.bin", static_cast<const float*>(static_q), D*C);
+    save_f32_raw("static_k.bin", static_cast<const float*>(static_k), D*C);
 
     std::vector<uint32_t> x_dims{B,L,C};
     std::vector<uint32_t> y_dims{D,C};
