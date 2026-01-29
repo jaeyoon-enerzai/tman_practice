@@ -11,6 +11,7 @@ add_library(qnn_common STATIC
   src/qnn_backendcache.cpp
   src/qnn_mem_manager.cpp
   src/qnn_sharedbuffer.cpp
+  src/qnn_profiler.cpp
 )
 target_include_directories(qnn_common PRIVATE
   ${QNN_INC_DIR}

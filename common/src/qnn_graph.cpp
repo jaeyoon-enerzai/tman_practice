@@ -33,7 +33,6 @@ bool QnnGraphRuntime::Create(const QnnInterface_t* be_iface,
   if(restore_mode_){
     err = api.graphRetrieve(ctx_, name_.c_str(), &graph_);
 
-    // TODO - profiler (see QnnGraphCommon.cpp - L69)
     return CheckQnnOk(err, "graphRetrieve");
   }
 

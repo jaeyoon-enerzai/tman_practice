@@ -4,6 +4,7 @@
 #include "QnnContext.h"
 #include "QnnInterface.h"
 #include "QnnTypes.h"
+#include "QnnProfile.h"
 
 static inline bool CheckQnnOk(Qnn_ErrorHandle_t err, const char* what) {
   if (err != QNN_SUCCESS) {
@@ -31,8 +32,9 @@ bool QnnContextRuntime::MakeConfig(std::vector<const QnnContext_Config_t*>& out_
   std::vector<QnnContext_CustomConfig_t> custom_cfgs;
 
 #if defined(__aarch64__)
+  QnnHtpContext_CustomConfig_t* p;
   if (use_multi_contexts_ && max_sf_buf_size_ != 0){
-    QnnHtpContext_CustomConfig_t* p = alloc_htp_custom();
+    p = alloc_htp_custom();
     p->option = QNN_HTP_CONTEXT_CONFIG_OPTION_REGISTER_MULTI_CONTEXTS;
     QnnHtpContext_GroupRegistration_t group_info;
     group_info.firstGroupHandle = sf_handle_;
@@ -40,6 +42,11 @@ bool QnnContextRuntime::MakeConfig(std::vector<const QnnContext_Config_t*>& out_
     p->groupRegistration = group_info;
     custom_cfgs.push_back(static_cast<QnnContext_CustomConfig_t>(p));
   }
+  // heap usage profling
+  p = alloc_htp_custom();
+  p->option = QNN_HTP_CONTEXT_CONFIG_OPTION_DSP_MEMORY_PROFILING_ENABLED;
+  p->dspMemoryProfilingEnabled = true;
+  custom_cfgs.push_back(static_cast<QnnContext_CustomConfig_t>(p));
 #else
   if (weight_sharing_){
     QnnHtpContext_CustomConfig_t* p = alloc_htp_custom();
@@ -106,6 +113,7 @@ bool QnnContextRuntime::Create(const QnnInterface_t* be,
 bool QnnContextRuntime::CreateFromBinary(const QnnInterface_t* be,
                     Qnn_BackendHandle_t backend_handle,
                     Qnn_DeviceHandle_t device_handle,
+                    Qnn_ProfileHandle_t profileHandle,
                     const uint8_t* ctx_bin,
                     uint32_t ctx_bin_bytes){
   if(!be || !backend_handle){
@@ -119,6 +127,7 @@ bool QnnContextRuntime::CreateFromBinary(const QnnInterface_t* be,
   be_ = be;
   backend_ = backend_handle;
   device_ = device_handle;
+  profiler_ = profileHandle;
 
   if(ctx_) return true;
 
@@ -132,8 +141,18 @@ bool QnnContextRuntime::CreateFromBinary(const QnnInterface_t* be,
 
   const QnnContext_Config_t** cfg_ptr = cfg.empty() ? nullptr : cfg.data();
 #if defined (__aarch64__)
-  Qnn_ErrorHandle_t err = api.contextCreateFromBinary(backend_handle, device_handle, cfg_ptr, ctx_bin, ctx_bin_bytes, &ctx_, /*profile=*/nullptr);
-
+  Qnn_ErrorHandle_t err = api.contextCreateFromBinary(backend_handle, device_handle, cfg_ptr, ctx_bin, ctx_bin_bytes, &ctx_, /*profile=*/profileHandle);
+  
+  const QnnProfile_EventId_t* events;
+  uint32_t numEvents;
+  be_->QNN_INTERFACE_VER_NAME.profileGetEvents(profileHandle, &events, &numEvents);
+  for(uint32_t i=0; i < numEvents; ++i){
+    QnnProfile_EventData_t eventData;
+    be_->QNN_INTERFACE_VER_NAME.profileGetEventData(events[i], &eventData);
+    if (strcmp(eventData.identifier, "DSP:before_context_created") == 0){
+      std::cout << "total DspHeap Usage Before Context Created : " << eventData.value << std::endl;
+    }
+  }
   if(!CheckQnnOk(err, "contextCreateFromBinary")) return false;
 #else
   std::cerr << "[QNN] CreateFromBinary is intended for aarch64 runtime only\n";
@@ -179,6 +198,21 @@ void QnnContextRuntime::Destroy() {
   // ExecuTorch가 쓰는 형태: contextFree(handle, profile=nullptr)
   // 네 SDK가 인자를 2개 요구하면 이게 맞고,
   // 1개만 요구하면 두 번째 인자를 지우면 됨.
-  (void)CheckQnnOk(api.contextFree(ctx_, /*profile=*/nullptr), "contextFree");
+  (void)CheckQnnOk(api.contextFree(ctx_, /*profile=*/profiler_), "contextFree");
+
+  const QnnProfile_EventId_t* events;
+  uint32_t numEvents;
+  be_->QNN_INTERFACE_VER_NAME.profileGetEvents(profiler_, &events, &numEvents);
+  for(uint32_t i=0; i < numEvents; ++i){
+    QnnProfile_EventData_t eventData;
+    be_->QNN_INTERFACE_VER_NAME.profileGetEventData(events[i], &eventData);
+    if (strcmp(eventData.identifier, "DSP:after_context_freed") == 0){
+      std::cout << "total DspHeap Usage After Context Created : " << eventData.value << std::endl;
+    }
+  }
+
+
   ctx_ = nullptr;
+  profiler_ = nullptr;
+
 }

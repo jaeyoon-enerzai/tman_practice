@@ -26,6 +26,7 @@ class QnnContextRuntime{
     bool CreateFromBinary(const QnnInterface_t* be,
                 Qnn_BackendHandle_t backend_handle,
                 Qnn_DeviceHandle_t device_handle,
+                Qnn_ProfileHandle_t profileHandle,
             const uint8_t* ctx_bin,
             uint32_t ctx_bin_bytes);
 
@@ -59,4 +60,5 @@ class QnnContextRuntime{
     uint64_t max_sf_buf_size_{0};
 
     static inline Qnn_ContextHandle_t sf_handle_{0x0};
+    Qnn_ProfileHandle_t profiler_{nullptr};
 };

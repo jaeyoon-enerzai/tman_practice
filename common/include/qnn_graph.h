@@ -12,6 +12,7 @@
 
 #include "qnn_graph_config.h"
 #include "qnn_tensor.h"
+#include "qnn_profiler.h"
 
 #ifndef QNN_OP_VER_PTR
 #define QNN_OP_VER_PTR(x) (&((x).v1))

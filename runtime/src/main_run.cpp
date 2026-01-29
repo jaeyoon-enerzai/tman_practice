@@ -16,6 +16,7 @@
 #include "qnn_backend.h"
 #include "qnn_context.h"
 #include "qnn_graph.h"
+#include "qnn_profiler.h"
 #include "qnn_sharedbuffer.h"
 #include "qnn_tensor.h"
 #include "qnn_backendcache.h"
@@ -151,9 +152,12 @@ int main(int argc, char** argv){
         return -1;
     }
 
+    QnnProfilerRuntime profiler;
+    profiler.Create(qnn.Backend(), backend.Handle(), QnnProfileLevel::Optrace);
+
     QnnContextRuntime ctx;
     // ctx.SetMultiContexts(true, /*max_sf_buf_size=*/spill_fill_size);
-    if(!ctx.CreateFromBinary(qnn.Backend(), backend.Handle(), device.Handle(), binData.data(), blob.nbytes)){
+    if(!ctx.CreateFromBinary(qnn.Backend(), backend.Handle(), device.Handle(), profiler.GetProfiler(), binData.data(), blob.nbytes)){
         std::cerr << "contextCreateFromBinary failed\n";
         return -1;
     }
@@ -302,6 +306,7 @@ int main(int argc, char** argv){
 
     // ===== 5) execute =====
     // QnnGraphRuntime에 Execute 함수가 없다면 be_->graphExecute를 직접 호출해도 됨
+    Qnn_ProfileHandle_t ph = profiler.GetProfiler();
     {
         auto& api = qnn.Backend()->QNN_INTERFACE_VER_NAME;
 
@@ -311,7 +316,7 @@ int main(int argc, char** argv){
             static_cast<uint32_t>(input_metas.size()),
             output_metas.data(),
             static_cast<uint32_t>(output_metas.size()),
-            /*profile=*/nullptr,
+            /*profile=*/ph,
             /*signal=*/nullptr);
 
         if (err != QNN_SUCCESS) {
@@ -319,6 +324,9 @@ int main(int argc, char** argv){
             return -1;
         }
     }
+    std::cout << "GRAPH EXECUTE\n";
+    profiler.DumpEvents();
+    std::cout << "DUMP DONE\n";
 
     // ===== 6) output dump (float32 기준으로 몇 개만) =====
     for (size_t i = 0; i < output_metas.size(); ++i) {
