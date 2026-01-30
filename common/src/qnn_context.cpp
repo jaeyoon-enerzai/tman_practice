@@ -200,17 +200,18 @@ void QnnContextRuntime::Destroy() {
   // 1개만 요구하면 두 번째 인자를 지우면 됨.
   (void)CheckQnnOk(api.contextFree(ctx_, /*profile=*/profiler_), "contextFree");
 
-  const QnnProfile_EventId_t* events;
-  uint32_t numEvents;
-  be_->QNN_INTERFACE_VER_NAME.profileGetEvents(profiler_, &events, &numEvents);
-  for(uint32_t i=0; i < numEvents; ++i){
-    QnnProfile_EventData_t eventData;
-    be_->QNN_INTERFACE_VER_NAME.profileGetEventData(events[i], &eventData);
-    if (strcmp(eventData.identifier, "DSP:after_context_freed") == 0){
-      std::cout << "total DspHeap Usage After Context Created : " << eventData.value << std::endl;
+  if(profiler_){
+    const QnnProfile_EventId_t* events;
+    uint32_t numEvents;
+    be_->QNN_INTERFACE_VER_NAME.profileGetEvents(profiler_, &events, &numEvents);
+    for(uint32_t i=0; i < numEvents; ++i){
+      QnnProfile_EventData_t eventData;
+      be_->QNN_INTERFACE_VER_NAME.profileGetEventData(events[i], &eventData);
+      if (strcmp(eventData.identifier, "DSP:after_context_freed") == 0){
+        std::cout << "total DspHeap Usage After Context Created : " << eventData.value << std::endl;
+      }
     }
   }
-
 
   ctx_ = nullptr;
   profiler_ = nullptr;

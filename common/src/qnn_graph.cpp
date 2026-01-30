@@ -13,6 +13,7 @@ static inline bool CheckQnnOk(Qnn_ErrorHandle_t err, const char* what) {
 
 bool QnnGraphRuntime::Create(const QnnInterface_t* be_iface,
                             Qnn_ContextHandle_t ctx,
+                            Qnn_ProfileHandle_t profiler,
                             const std::string& graph_name
                           ) {
   if (!be_iface || !ctx) {
@@ -25,6 +26,7 @@ bool QnnGraphRuntime::Create(const QnnInterface_t* be_iface,
   be_ = be_iface;
   ctx_ = ctx;
   name_ = graph_name;
+  profiler_ = profiler;
 
   auto& api = be_->QNN_INTERFACE_VER_NAME;
 
@@ -113,5 +115,5 @@ bool QnnGraphRuntime::Finalize() {
   if (!be_ || !graph_) return false;
   auto& api = be_->QNN_INTERFACE_VER_NAME;
   // profileHandle/signalHandle 지금은 nullptr
-  return CheckQnnOk(api.graphFinalize(graph_, /*profile=*/nullptr, /*signal=*/nullptr), "graphFinalize");
+  return CheckQnnOk(api.graphFinalize(graph_, /*profile=*/profiler_, /*signal=*/nullptr), "graphFinalize");
 }

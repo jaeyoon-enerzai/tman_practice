@@ -1,6 +1,7 @@
 #!/bin/bash
 
-QNN_SDK=/workspace/2.37.1.250807/
+# QNN_SDK=/workspace/2.37.1.250807/
+QNN_SDK=/workspace/2.40.0.251030/
 WORKSP=/data/local/tmp/htprun
 # adb push $QNN_SDK/lib/aarch64-android/libQnnHtp.so $WORKSP
 # adb push $QNN_SDK/lib/hexagon-v73/unsigned/libQnnHtpV73Skel.so $WORKSP

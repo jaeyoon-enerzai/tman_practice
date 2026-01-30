@@ -11,8 +11,8 @@
 #include "QnnCommon.h"
 
 #include "qnn_graph_config.h"
-#include "qnn_tensor.h"
 #include "qnn_profiler.h"
+#include "qnn_tensor.h"
 
 #ifndef QNN_OP_VER_PTR
 #define QNN_OP_VER_PTR(x) (&((x).v1))
@@ -35,6 +35,7 @@ public:
 
   bool Create(const QnnInterface_t* be_iface,
               Qnn_ContextHandle_t ctx,
+              Qnn_ProfileHandle_t profiler,
               const std::string& graph_name);
 
   void Destroy();
@@ -47,8 +48,6 @@ public:
   bool AddNode(const Qnn_OpConfig_t& op_config);
   bool Finalize();
 
-  // TODO - Execute, Profile
-
 private:
   const QnnInterface_t* be_{nullptr};
   Qnn_ContextHandle_t ctx_{nullptr};
@@ -57,5 +56,6 @@ private:
   std::unique_ptr<QnnHtpGraphCustomConfigRuntime> htp_graph_cfg_;
   std::vector<QnnGraph_Config_t> graph_cfg_storage_;
 
+  Qnn_ProfileHandle_t profiler_{nullptr};
   bool restore_mode_{false};
 };

@@ -14,6 +14,7 @@
 #include "qnn_context.h"
 #include "qnn_graph.h"
 #include "qnn_tensor.h"
+#include "qnn_profiler.h"
 #include "qnn_log.h"
 
 static bool save_f32_raw(const std::string& path, const float* data, size_t numel) {
@@ -150,6 +151,12 @@ int main(int argc, char** argv) {
     }
     std::cout << "deviceCreate OK\n";
 
+    QnnProfilerRuntime profiler;
+    if(!profiler.Create(qnn.Backend(), qnn.System(), backend.Handle(), QnnProfileLevel::Optrace, true, "qnn.log")){
+        std::cerr << "ProfilerCreate failed\n";
+        return -1;
+    }
+
     QnnContextRuntime ctx;
     // ctx.SetWeightSharing(true);
     if(!ctx.Create(qnn.Backend(), backend.Handle(), device.Handle())){
@@ -161,7 +168,7 @@ int main(int argc, char** argv) {
 
     QnnGraphRuntime graph;
     graph.SetRestoreMode(false);
-    if (!graph.Create(qnn.Backend(), ctx.Handle(), "empty_graph")) {
+    if (!graph.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), "empty_graph")) {
         std::cerr << "graphCreate failed\n";
         return -1;
     }

@@ -153,7 +153,10 @@ int main(int argc, char** argv){
     }
 
     QnnProfilerRuntime profiler;
-    profiler.Create(qnn.Backend(), backend.Handle(), QnnProfileLevel::Optrace);
+    if(!profiler.Create(qnn.Backend(), qnn.System(), backend.Handle(), QnnProfileLevel::Optrace, true, "qnn.log")){
+        std::cerr << "ProfilerCreate failed\n";
+        return -1;
+    }
 
     QnnContextRuntime ctx;
     // ctx.SetMultiContexts(true, /*max_sf_buf_size=*/spill_fill_size);
@@ -166,7 +169,7 @@ int main(int argc, char** argv){
 
     QnnGraphRuntime graph;
     graph.SetRestoreMode(true);
-    if (!graph.Create(qnn.Backend(), ctx.Handle(), graph_name)) {
+    if (!graph.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), graph_name)) {
         std::cerr << "graphCreate failed\n";
         return -1;
     }
@@ -325,8 +328,13 @@ int main(int argc, char** argv){
         }
     }
     std::cout << "GRAPH EXECUTE\n";
-    profiler.DumpEvents();
-    std::cout << "DUMP DONE\n";
+    // profiler.DumpEvents();
+    // std::cout << "DUMP DONE\n";
+    profiler.DumpEventsRecursive(/*dump_sub_events=*/true, /*max_depth=*/32);
+
+    if(!profiler.SerializeAfterExecute(graph_name.c_str())){
+        std::cerr << "[QNN] SerializeAfterExecute failed\n";
+    }
 
     // ===== 6) output dump (float32 기준으로 몇 개만) =====
     for (size_t i = 0; i < output_metas.size(); ++i) {
