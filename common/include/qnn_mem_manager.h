@@ -59,5 +59,6 @@ class QnnMemManagerRuntime{
 
     std::unordered_map<Qnn_MemHandle_t, void*> registered_;
     std::vector<std::unique_ptr<QnnMemHtp_Descriptor_t>> htp_desc_storage_;
+    std::unordered_map<uint64_t, Qnn_MemHandle_t> sb_handle_by_key_;
 
 };

@@ -179,6 +179,10 @@ void QnnMemManagerRuntime::DeRegisterAll(){
 #endif
 }
 
+static inline uint64_t MakeKey(int fd, size_t off) {
+  return (uint64_t(uint32_t(fd)) << 32) | uint64_t(uint32_t(off));
+}
+
 bool QnnMemManagerRuntime::RegisterTensorInSharedArena(
         SharedBuffer& sb, SharedBuffer::Arena& arena,
         Qnn_Tensor_t& tensor_meta, size_t tensor_bytes,
@@ -198,6 +202,17 @@ bool QnnMemManagerRuntime::RegisterTensorInSharedArena(
     return false;
   }
 
+  const uint64_t key = MakeKey(arena.fd, off);
+  auto it = sb_handle_by_key_.find(key);
+  if(it != sb_handle_by_key_.end()){
+    Qnn_MemHandle_t h = it->second;
+    SetTensorMemHandle(tensor_meta, h);
+    *out_ptr = ptr;
+    *out_handle = h;
+    if(out_offset) *out_offset = off;
+    return true;
+  }
+
   Qnn_MemHandle_t h = nullptr;
   if (!RegisterHtpSharedBufferCustom(
     tensor_meta, arena.fd, ptr, arena.total, off, &h
@@ -205,6 +220,8 @@ bool QnnMemManagerRuntime::RegisterTensorInSharedArena(
     std::cerr << "[QNN] RegisterHtpSharedBufferCustom failed\n";
     return false;
   }
+
+  sb_handle_by_key_[key] = h;
 
   *out_ptr = ptr;
   *out_handle = h;

@@ -302,8 +302,8 @@ int main(int argc, char** argv) {
     // randomize static tensor data
     unsigned int B = 1;
     unsigned int L = 30;
-    unsigned int D = 1024;
-    unsigned int C = 2048;
+    unsigned int D = 64;
+    unsigned int C = 128;
     std::mt19937 rng(12345);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     unsigned int v_bytes = static_cast<uint32_t>(D * C * sizeof(float));
