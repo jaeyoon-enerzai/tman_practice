@@ -21,11 +21,20 @@
 
 ## Step6 - execute the graph and check the result value
 
+```
+bash run.sh
+```
+
 ## Step7 - Add a shared buffer for kv cache - see MemoryManager
 
 ## Step8 - Add a profiler
 
-## Step9 - Add PreRegister
+```
+adb pull /data/local/tmp/htprun/qnn.log output/qnn-profiling-data_0.log
+/workspace/2.40.0.251030/bin/x86_64-linux-clang/qnn-profile-viewer --config config.json --reader /workspace/2.40.0.251030/lib/x86_64-linux-clang/libQnnHtpOptraceProfilingReader.so --input_log output/qnn-profiling-data_0.log --schematic kv_forward_schematic.bin    --output ./chrometrace.json
+```
+
+## Step9 - Prefill/Decoding separation (Multi-graph?? Multi method??)
 
 ## Step10 - Add a quantization
 - Blockwise config
@@ -33,8 +42,9 @@
 ## Step11 - Add a customized op package
 - see QnnBackendCommon.cpp
 
-## Step12 - Visualize the graph
+## Step12 - Increase block layer number
 
-## Step13 - Prefill/Decoding separation (Multi-graph?? Multi method??)
+## Step13 - Visualize the graph
 
-## Step14 - Increase block layer number
+## Step14 - Add PreRegister
+

@@ -3,3 +3,8 @@ build
 *.bin
 build_aot
 build_runtime
+*.json
+*.html
+*.log
+*.zip
+*.txt

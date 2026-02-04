@@ -113,6 +113,109 @@ static OpHolder MakeOpHolder(const std::string& name,
   return h;  // 값으로 반환해도 내부 문자열/vector는 이동(move)되어 안전
 }
 
+
+static bool BuildOneGraph(
+    QnnBackendRuntime& backend,
+    QnnGraphRuntime& graph,
+    // (필요하면) seed나 차이 주는 파라미터 추가 가능
+    unsigned int B, unsigned int L, unsigned int D, unsigned int C,
+    float* static_v, float* static_q, float* static_k,
+    unsigned int v_bytes, unsigned int qk_bytes
+) {
+  // ---- Tensor 정의 ----
+  std::vector<uint32_t> x_dims{B, L, C};
+  std::vector<uint32_t> y_dims{D, C};
+  std::vector<uint32_t> v_dims{D, D};
+  std::vector<uint32_t> flatten_o_dims{B * L, D};
+  std::vector<uint32_t> o_dims{B, L, D};
+  std::vector<uint32_t> attn_dims{B, L, L};
+
+  // ⚠️ 중요:
+  // 같은 weight sharing을 노리면 wq/wk/wvprime 같은 STATIC 텐서는
+  // 두 graph에서 "이름이 동일"해야 할 가능성이 매우 큼.
+  // (지금은 일단 동일 name 유지)
+  QnnTensor x("x",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, x_dims);
+  QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, y_dims);
+
+  QnnTensor wq("wq", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, y_dims,
+               nullptr, qk_bytes, static_cast<const void*>(static_q));
+  QnnTensor wk("wk", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, y_dims,
+               nullptr, qk_bytes, static_cast<const void*>(static_k));
+  QnnTensor wvprime("wvprime", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, v_dims,
+                    nullptr, v_bytes, static_cast<const void*>(static_v));
+
+  QnnTensor wv("wv", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, y_dims);
+  QnnTensor q("q", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
+  QnnTensor qprime("qprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
+  QnnTensor k("k", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
+  QnnTensor kprime("kprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
+  QnnTensor v("v", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
+  QnnTensor attn("attn", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, attn_dims);
+  QnnTensor out("o", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, o_dims);
+
+  // ---- Graph tensor 등록 ----
+  if (!graph.EnsureTensorInGraph(x)) return false;
+  if (!graph.EnsureTensorInGraph(y)) return false;
+  if (!graph.EnsureTensorInGraph(wq)) return false;
+  if (!graph.EnsureTensorInGraph(wk)) return false;
+  if (!graph.EnsureTensorInGraph(wvprime)) return false;
+  if (!graph.EnsureTensorInGraph(wv)) return false;
+  if (!graph.EnsureTensorInGraph(q)) return false;
+  if (!graph.EnsureTensorInGraph(qprime)) return false;
+  if (!graph.EnsureTensorInGraph(k)) return false;
+  if (!graph.EnsureTensorInGraph(kprime)) return false;
+  if (!graph.EnsureTensorInGraph(v)) return false;
+  if (!graph.EnsureTensorInGraph(attn)) return false;
+  if (!graph.EnsureTensorInGraph(out)) return false;
+
+  const char* kPackage = "qti.aisw";
+
+  // ---- Op 만들기 ----
+  OpHolder matmul_q = MakeOpHolder("matmul_q", kPackage, "FullyConnected", x, &wq, q,
+                                   [&](OpHolder& oh){ oh.addScalarB8("keep_dims", 0); });
+  OpHolder matmul_k = MakeOpHolder("matmul_k", kPackage, "FullyConnected", x, &wk, k,
+                                   [&](OpHolder&){});
+  OpHolder matmul_wv  = MakeOpHolder("matmul_wv", kPackage, "MatMul", wvprime, &y, wv,
+                                     [&](OpHolder&){});
+  OpHolder matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, &wv, v,
+                                   [&](OpHolder& oh){ oh.addScalarB8("transpose_in1", 1); });
+  OpHolder reshape_q = MakeOpHolder("reshape_q", kPackage, "Reshape", q, nullptr, qprime,
+                                    [&](OpHolder&){});
+  OpHolder reshape_k = MakeOpHolder("reshape_k", kPackage, "Reshape", k, nullptr, kprime,
+                                    [&](OpHolder&){});
+  OpHolder matmul_attn = MakeOpHolder("matmul_attn", kPackage, "MatMul", qprime, &kprime, attn,
+                                      [&](OpHolder& oh){ oh.addScalarB8("transpose_in1", 1); });
+  OpHolder matmul_o = MakeOpHolder("matmul_o", kPackage, "MatMul", attn, &v, out,
+                                   [&](OpHolder&){});
+
+  // ---- Validate + AddNode ----
+  auto validate_and_add = [&](OpHolder& op, const char* tag) -> bool {
+    if (!backend.ValidateOpConfig(op.cfg)) {
+      std::cerr << "ValidateOpConfig failed: " << tag << "\n";
+      return false;
+    }
+    if (!graph.AddNode(op.cfg)) {
+      std::cerr << "AddNode failed: " << tag << "\n";
+      return false;
+    }
+    return true;
+  };
+
+  if (!validate_and_add(matmul_q, "matmul_q")) return false;
+  if (!validate_and_add(matmul_k, "matmul_k")) return false;
+  if (!validate_and_add(matmul_wv, "matmul_wv")) return false;
+  if (!validate_and_add(reshape_q, "reshape_q")) return false;
+  if (!validate_and_add(reshape_k, "reshape_k")) return false;
+  if (!validate_and_add(matmul_attn, "matmul_attn")) return false;
+  if (!validate_and_add(matmul_v, "matmul_v")) return false;
+  if (!validate_and_add(matmul_o, "matmul_o")) return false;
+
+  // ---- Finalize ----
+  if (!graph.Finalize()) return false;
+
+  return true;
+}
+
 int main(int argc, char** argv) {
     const std::string backend_so = "libQnnHtp.so";
     const std::string system_so = "libQnnSystem.so";
@@ -158,7 +261,7 @@ int main(int argc, char** argv) {
     }
 
     QnnContextRuntime ctx;
-    // ctx.SetWeightSharing(true);
+    ctx.SetWeightSharing(true);
     if(!ctx.Create(qnn.Backend(), backend.Handle(), device.Handle())){
         std::cerr << "contextCreate failed\n";
         return -1;
@@ -166,20 +269,25 @@ int main(int argc, char** argv) {
 
     std::cout << "contextCreate OK\n";
 
-    QnnGraphRuntime graph;
-    graph.SetRestoreMode(false);
-    if (!graph.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), "empty_graph")) {
-        std::cerr << "graphCreate failed\n";
+    QnnGraphRuntime graph_kv, graph_prefill;
+    graph_kv.SetRestoreMode(false);
+    graph_prefill.SetRestoreMode(false);
+    if (!graph_kv.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), "kv_forward")) {
+        std::cerr << "graphCreate for kv graph failed\n";
+        return -1;
+    }
+    if (!graph_prefill.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), "prefill_forward")) {
+        std::cerr << "graphCreate for prefill graph failed\n";
         return -1;
     }
 
-    std::cout << "graphCreate OK. graph_handle=" << graph.Handle() << "\n";
+    std::cout << "graphCreate OK. kv graph_handle=" << graph_kv.Handle() << " and prefill graph handle=" << graph_prefill.Handle() << "\n";
 
     // randomize static tensor data
     unsigned int B = 1;
     unsigned int L = 30;
-    unsigned int D = 8;
-    unsigned int C = 16;
+    unsigned int D = 1024;
+    unsigned int C = 2048;
     std::mt19937 rng(12345);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     unsigned int v_bytes = static_cast<uint32_t>(D * D * sizeof(float));
@@ -196,157 +304,23 @@ int main(int argc, char** argv) {
     save_f32_raw("static_q.bin", static_cast<const float*>(static_q), D*C);
     save_f32_raw("static_k.bin", static_cast<const float*>(static_k), D*C);
 
-    std::vector<uint32_t> x_dims{B,L,C};
-    std::vector<uint32_t> y_dims{D,C};
-    std::vector<uint32_t> v_dims{D, D};
-    std::vector<uint32_t> flatten_o_dims{B*L,D};
-    std::vector<uint32_t> o_dims = {B, L, D};
-    std::vector<uint32_t> attn_dims{B,L,L};
-    QnnTensor x("x",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, x_dims);
-    QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, y_dims);
-    QnnTensor wq("wq", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, y_dims, nullptr, qk_bytes, static_cast<const void*>(static_q));
-    QnnTensor wk("wk", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, y_dims, nullptr, qk_bytes, static_cast<const void*>(static_k));
-    QnnTensor wvprime("wvprime", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, v_dims, nullptr, v_bytes, static_cast<const void*>(static_v));
-    QnnTensor wv("wv", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, y_dims);
-    QnnTensor q("q", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
-    QnnTensor qprime("qprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
-    QnnTensor k("k", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
-    QnnTensor kprime("kprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
-    QnnTensor v("v", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
-    QnnTensor attn("attn", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, attn_dims);
-    QnnTensor out("o", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, o_dims);
-
-std::cout
-        << "x id=" << QNN_TENSOR_VER_PTR(*x.Tensor())->id
-        << " y id=" << QNN_TENSOR_VER_PTR(*y.Tensor())->id
-        << " o id=" << QNN_TENSOR_VER_PTR(*out.Tensor())->id
-        << "\n";
-
-
-    if (!graph.EnsureTensorInGraph(x)) return -1;
-    if (!graph.EnsureTensorInGraph(y)) return -1;
-    if (!graph.EnsureTensorInGraph(wq)) return -1;
-    if (!graph.EnsureTensorInGraph(wk)) return -1;
-    if (!graph.EnsureTensorInGraph(wvprime)) return -1;
-    if (!graph.EnsureTensorInGraph(wv)) return -1;
-    if (!graph.EnsureTensorInGraph(q)) return -1;
-    if (!graph.EnsureTensorInGraph(qprime)) return -1;
-    if (!graph.EnsureTensorInGraph(k)) return -1;
-    if (!graph.EnsureTensorInGraph(kprime)) return -1;
-    if (!graph.EnsureTensorInGraph(v)) return -1;
-    if (!graph.EnsureTensorInGraph(attn)) return -1;
-    if (!graph.EnsureTensorInGraph(out)) return -1;
-
-    // executorch가 쓰는 값으로 맞춰라 (아래는 흔한 예시 문자열)
-    const char* kPackage = "qti.aisw";
-    const char* kType    = "ElementWiseAdd";
-    std::string add_name = "add0";
-
-    OpHolder matmul_q = MakeOpHolder("matmul_q", kPackage, "FullyConnected", x, &wq, q, [&](OpHolder& oh){oh.addScalarB8("keep_dims", 0);});
-    OpHolder matmul_k = MakeOpHolder("matmul_k", kPackage, "FullyConnected", x, &wk, k, [&](OpHolder&){});
-    OpHolder matmul_wv  = MakeOpHolder("matmul_wv", kPackage, "MatMul", wvprime, &y, wv, [&](OpHolder&){}); // static인데 될 지는 모르겠다
-    OpHolder matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, &wv, v, [&](OpHolder& oh){oh.addScalarB8("transpose_in1", 1);});
-    OpHolder reshape_q = MakeOpHolder("reshape_q", kPackage, "Reshape", q, nullptr, qprime, [&](OpHolder&){});
-    OpHolder reshape_k = MakeOpHolder("reshape_k", kPackage, "Reshape", k, nullptr, kprime, [&](OpHolder&){});
-    OpHolder matmul_attn = MakeOpHolder("matmul_attn", kPackage, "MatMul", qprime, &kprime, attn, [&](OpHolder& oh){oh.addScalarB8("transpose_in1", 1);});
-    OpHolder matmul_o = MakeOpHolder("matmul_o", kPackage, "MatMul", attn, &v, out, [&](OpHolder&){});
-
-    std::cout
-        << "x id=" << QNN_TENSOR_VER_PTR(*x.Tensor())->id
-        << " y id=" << QNN_TENSOR_VER_PTR(*y.Tensor())->id
-        << " o id=" << QNN_TENSOR_VER_PTR(*out.Tensor())->id
-        << "\n";
-
-    if(!backend.ValidateOpConfig(matmul_q.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
+    if(!BuildOneGraph(backend, graph_kv, B, L, D, C, static_v, static_q, static_k, v_bytes, qk_bytes)){
+        std::cerr << "BuildOneGraph for kv graph failed\n";
         return -1;
     }
-
-    std::cout << "VALIDATED matmul_q\n";
-
-    if (!graph.AddNode(matmul_q.cfg)) return -1;
-    std::cout << "Added matmul_q Op Node\n";
-
-    if(!backend.ValidateOpConfig(matmul_k.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
+    if(!BuildOneGraph(backend, graph_prefill, B, L, D, C, static_v, static_q, static_k, v_bytes, qk_bytes)){
+        std::cerr << "BuildOneGraph for prefill graph failed\n";
         return -1;
     }
-
-    std::cout << "VALIDATED matmul_k\n";
-
-    if (!graph.AddNode(matmul_k.cfg)) return -1;
-    std::cout << "Added matmul_k Op Node\n";
-
-    // wv
-    if(!backend.ValidateOpConfig(matmul_wv.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
-        return -1;
-    }
-
-    std::cout << "VALIDATED matmul_wv\n";
-
-    if (!graph.AddNode(matmul_wv.cfg)) return -1;
-    std::cout << "Added matmul_wv Op Node\n";
-    //reshape_q
-    if(!backend.ValidateOpConfig(reshape_q.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
-        return -1;
-    }
-
-    std::cout << "VALIDATED reshape_q\n";
-
-    if (!graph.AddNode(reshape_q.cfg)) return -1;
-    std::cout << "Added reshape_q Op Node\n";
-    //reshape_k
-    if(!backend.ValidateOpConfig(reshape_k.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
-        return -1;
-    }
-
-    std::cout << "VALIDATED reshape_k\n";
-
-    if (!graph.AddNode(reshape_k.cfg)) return -1;
-    std::cout << "Added reshape_k Op Node\n";
-    // matmul attn
-    if(!backend.ValidateOpConfig(matmul_attn.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
-        return -1;
-    }
-
-    std::cout << "VALIDATED matmul_attn\n";
-
-    if (!graph.AddNode(matmul_attn.cfg)) return -1;
-    std::cout << "Added matmul_attn Op Node\n";
-    // matmul v
-    if(!backend.ValidateOpConfig(matmul_v.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
-        return -1;
-    }
-
-    std::cout << "VALIDATED matmul_v\n";
-
-    if (!graph.AddNode(matmul_v.cfg)) return -1;
-    std::cout << "Added matmul_v Op Node\n";
-    // matmul o
-    if(!backend.ValidateOpConfig(matmul_o.cfg)){
-        std::cout << "Something is wrong in OpConfig\n";
-        return -1;
-    }
-
-    std::cout << "VALIDATED matmul_o\n";
-
-    if (!graph.AddNode(matmul_o.cfg)) return -1;
-    std::cout << "Added matmul_o Op Node\n";
-    if (!graph.Finalize()) return -1;
 
     std::vector<uint8_t> blob;
     if (!ctx.GetBinary(blob)) return -1;
 
-    std::ofstream ofs("add_graph.bin", std::ios::binary);
+    std::ofstream ofs("multi_graph.bin", std::ios::binary);
     ofs.write(reinterpret_cast<const char*>(blob.data()), blob.size());
     ofs.close();
 
-    std::cout << "OK: wrote context binary add_graph.bin (" << blob.size() << " bytes)\n";
+    std::cout << "OK: wrote context binary multi_graph.bin (" << blob.size() << " bytes)\n";
 
     delete[] static_v;
     delete[] static_q;

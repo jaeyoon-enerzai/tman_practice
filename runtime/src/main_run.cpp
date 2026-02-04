@@ -96,7 +96,7 @@ static void batch_matmul_f32(
 }
 
 int main(int argc, char** argv){
-    std::ifstream bin("add_graph.bin", std::ios::binary | std::ios::ate);
+    std::ifstream bin("multi_graph.bin", std::ios::binary | std::ios::ate);
     assert(bin.is_open());
 
     size_t binSize = bin.tellg();
@@ -165,7 +165,7 @@ int main(int argc, char** argv){
         return -1;
     }
 
-    const std::string graph_name = "empty_graph";
+    const std::string graph_name = "kv_forward";
 
     QnnGraphRuntime graph;
     graph.SetRestoreMode(true);
@@ -238,7 +238,7 @@ int main(int argc, char** argv){
     std::vector<std::vector<uint8_t>> output_bufs(output_metas.size());
 
     // 대충 크게 alloc
-    if (!sb.ArenaCreate(arena, 4000, 64)){
+    if (!sb.ArenaCreate(arena, 10000000, 64)){
         std::cerr << "ArenaCreate failed\n";
         return -1;
     }
@@ -361,8 +361,8 @@ int main(int argc, char** argv){
     // CPU reference
     unsigned int B = 1;
     unsigned int L = 30;
-    unsigned int D = 8;
-    unsigned int C = 16;
+    unsigned int D = 1024;
+    unsigned int C = 2048;
     std::vector<float> static_q, static_k, static_v;
     if (!load_f32_raw("static_q.bin", static_q, D*C)) return -1;
     if (!load_f32_raw("static_k.bin", static_k, D*C)) return -1;

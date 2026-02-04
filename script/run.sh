@@ -11,7 +11,7 @@ WORKSP=/data/local/tmp/htprun
 # adb push $QNN_SDK/lib/aarch64-android/libQnnModelDlc.so $WORKSP
 
 adb push ../build_runtime/runtime/qnn_runtime_runner  $WORKSP
-adb push add_graph.bin $WORKSP
+adb push multi_graph.bin $WORKSP
 adb push static_q.bin $WORKSP
 adb push static_k.bin $WORKSP
 adb push static_v.bin $WORKSP
