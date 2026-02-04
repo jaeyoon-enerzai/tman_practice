@@ -165,7 +165,8 @@ int main(int argc, char** argv){
         return -1;
     }
 
-    const std::string graph_name = "kv_forward";
+    const std::string graph_name = "prefill_forward";
+    bool is_kv = false;
 
     QnnGraphRuntime graph;
     graph.SetRestoreMode(true);
@@ -238,7 +239,7 @@ int main(int argc, char** argv){
     std::vector<std::vector<uint8_t>> output_bufs(output_metas.size());
 
     // 대충 크게 alloc
-    if (!sb.ArenaCreate(arena, 10000000, 64)){
+    if (!sb.ArenaCreate(arena, 20000000, 64)){
         std::cerr << "ArenaCreate failed\n";
         return -1;
     }
@@ -366,7 +367,7 @@ int main(int argc, char** argv){
     std::vector<float> static_q, static_k, static_v;
     if (!load_f32_raw("static_q.bin", static_q, D*C)) return -1;
     if (!load_f32_raw("static_k.bin", static_k, D*C)) return -1;
-    if (!load_f32_raw("static_v.bin", static_v, D*D)) return -1;
+    if (!load_f32_raw("static_v.bin", static_v, D*C)) return -1;
 
     std::vector<float> wv, q, k, v, attn, out;
     wv.resize(D*C);
@@ -377,8 +378,12 @@ int main(int argc, char** argv){
     out.resize(B*L*D);
     batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(static_q.data()), q.data(), B, L, C, D, 1, true);
     batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(static_k.data()), k.data(), B, L, C, D, 1, true);
-    batch_matmul_f32(static_cast<const float*>(static_v.data()), reinterpret_cast<const float*>(input_ptrs[1]), wv.data(), 1, D, D, C, 1, false);
-    batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(wv.data()), v.data(), B, L, C, D, 1, true);
+    if(!is_kv){
+        batch_matmul_f32(static_cast<const float*>(static_v.data()), reinterpret_cast<const float*>(input_ptrs[1]), wv.data(), 1, D, C, C, 1, false);
+        batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(wv.data()), v.data(), B, L, C, D, 1, true);
+    } else{
+        batch_matmul_f32(reinterpret_cast<const float*>(input_ptrs[0]), static_cast<const float*>(static_v.data()), v.data(), B, L, C, D, 1, true);
+    }
     batch_matmul_f32(static_cast<const float*>(q.data()), static_cast<const float*>(k.data()), attn.data(), B, L, D, L, B, true);
     batch_matmul_f32(static_cast<const float*>(attn.data()), static_cast<const float*>(v.data()), out.data(), B, L, L, D, B, false);
 

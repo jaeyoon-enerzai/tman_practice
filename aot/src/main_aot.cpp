@@ -103,8 +103,6 @@ static OpHolder MakeOpHolder(const std::string& name,
   std::cout << "[MakeAddOpHolder] " << name << "\n";
   std::cout << "  input0 id: " << QNN_TENSOR_VER_PTR(h.inputs[0])->id
             << " size: " << QNN_TENSOR_VER_PTR(h.inputs[0])->clientBuf.dataSize << "\n";
-  std::cout << "  input1 id: " << QNN_TENSOR_VER_PTR(h.inputs[1])->id
-            << " size: " << QNN_TENSOR_VER_PTR(h.inputs[1])->clientBuf.dataSize << "\n";
   std::cout << "  output id: " << QNN_TENSOR_VER_PTR(h.outputs[0])->id
             << " size: " << QNN_TENSOR_VER_PTR(h.outputs[0])->clientBuf.dataSize << "\n";
 
@@ -117,6 +115,7 @@ static OpHolder MakeOpHolder(const std::string& name,
 static bool BuildOneGraph(
     QnnBackendRuntime& backend,
     QnnGraphRuntime& graph,
+    bool is_kv,
     // (필요하면) seed나 차이 주는 파라미터 추가 가능
     unsigned int B, unsigned int L, unsigned int D, unsigned int C,
     float* static_v, float* static_q, float* static_k,
@@ -124,8 +123,8 @@ static bool BuildOneGraph(
 ) {
   // ---- Tensor 정의 ----
   std::vector<uint32_t> x_dims{B, L, C};
-  std::vector<uint32_t> y_dims{D, C};
-  std::vector<uint32_t> v_dims{D, D};
+  std::vector<uint32_t> y_dims{C, C};
+  std::vector<uint32_t> v_dims{D, C};
   std::vector<uint32_t> flatten_o_dims{B * L, D};
   std::vector<uint32_t> o_dims{B, L, D};
   std::vector<uint32_t> attn_dims{B, L, L};
@@ -137,14 +136,18 @@ static bool BuildOneGraph(
   QnnTensor x("x",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, x_dims);
   QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, y_dims);
 
-  QnnTensor wq("wq", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, y_dims,
+  QnnTensor wq("wq", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, v_dims,
                nullptr, qk_bytes, static_cast<const void*>(static_q));
-  QnnTensor wk("wk", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, y_dims,
+  QnnTensor wk("wk", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, v_dims,
                nullptr, qk_bytes, static_cast<const void*>(static_k));
   QnnTensor wvprime("wvprime", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, v_dims,
                     nullptr, v_bytes, static_cast<const void*>(static_v));
-
-  QnnTensor wv("wv", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, y_dims);
+  std::unique_ptr<QnnTensor> wv_ptr;
+  if(!is_kv){
+    wv_ptr = std::make_unique<QnnTensor>(
+        "wv", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, v_dims
+    );
+  }
   QnnTensor q("q", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
   QnnTensor qprime("qprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
   QnnTensor k("k", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
@@ -159,7 +162,9 @@ static bool BuildOneGraph(
   if (!graph.EnsureTensorInGraph(wq)) return false;
   if (!graph.EnsureTensorInGraph(wk)) return false;
   if (!graph.EnsureTensorInGraph(wvprime)) return false;
-  if (!graph.EnsureTensorInGraph(wv)) return false;
+  if(!is_kv){
+    if (!graph.EnsureTensorInGraph(*wv_ptr)) return false;
+  }
   if (!graph.EnsureTensorInGraph(q)) return false;
   if (!graph.EnsureTensorInGraph(qprime)) return false;
   if (!graph.EnsureTensorInGraph(k)) return false;
@@ -175,10 +180,16 @@ static bool BuildOneGraph(
                                    [&](OpHolder& oh){ oh.addScalarB8("keep_dims", 0); });
   OpHolder matmul_k = MakeOpHolder("matmul_k", kPackage, "FullyConnected", x, &wk, k,
                                    [&](OpHolder&){});
-  OpHolder matmul_wv  = MakeOpHolder("matmul_wv", kPackage, "MatMul", wvprime, &y, wv,
+  OpHolder matmul_wv, matmul_v;
+  if(!is_kv){
+    matmul_wv  = MakeOpHolder("matmul_wv", kPackage, "MatMul", wvprime, &y, *wv_ptr,
                                      [&](OpHolder&){});
-  OpHolder matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, &wv, v,
+    matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, wv_ptr.get(), v,
                                    [&](OpHolder& oh){ oh.addScalarB8("transpose_in1", 1); });
+  } else{
+    matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, &wvprime, v,
+                                   [&](OpHolder& oh){ oh.addScalarB8("transpose_in1", 1); });
+  }
   OpHolder reshape_q = MakeOpHolder("reshape_q", kPackage, "Reshape", q, nullptr, qprime,
                                     [&](OpHolder&){});
   OpHolder reshape_k = MakeOpHolder("reshape_k", kPackage, "Reshape", k, nullptr, kprime,
@@ -190,20 +201,25 @@ static bool BuildOneGraph(
 
   // ---- Validate + AddNode ----
   auto validate_and_add = [&](OpHolder& op, const char* tag) -> bool {
+    std::cout << "Validate and add : " << tag << std::endl;
     if (!backend.ValidateOpConfig(op.cfg)) {
       std::cerr << "ValidateOpConfig failed: " << tag << "\n";
       return false;
     }
+    std::cout << "Validated Op " << tag << " and now adding\n";
     if (!graph.AddNode(op.cfg)) {
       std::cerr << "AddNode failed: " << tag << "\n";
       return false;
     }
+    std::cout << "Added Node " << tag << "\n";
     return true;
   };
 
   if (!validate_and_add(matmul_q, "matmul_q")) return false;
   if (!validate_and_add(matmul_k, "matmul_k")) return false;
-  if (!validate_and_add(matmul_wv, "matmul_wv")) return false;
+  if(!is_kv){
+    if (!validate_and_add(matmul_wv, "matmul_wv")) return false;
+  }
   if (!validate_and_add(reshape_q, "reshape_q")) return false;
   if (!validate_and_add(reshape_k, "reshape_k")) return false;
   if (!validate_and_add(matmul_attn, "matmul_attn")) return false;
@@ -290,9 +306,9 @@ int main(int argc, char** argv) {
     unsigned int C = 2048;
     std::mt19937 rng(12345);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    unsigned int v_bytes = static_cast<uint32_t>(D * D * sizeof(float));
-    float* static_v = new float[D*D];
-    for (size_t i=0; i< D*D; i++) static_v[i] = dist(rng);
+    unsigned int v_bytes = static_cast<uint32_t>(D * C * sizeof(float));
+    float* static_v = new float[D*C];
+    for (size_t i=0; i< D*C; i++) static_v[i] = dist(rng);
     unsigned int qk_bytes = static_cast<uint32_t>(D * C * sizeof(float));
     float* static_q = new float[D*C];
     for (size_t i=0; i< D*C; i++) static_q[i] = dist(rng);
@@ -300,19 +316,22 @@ int main(int argc, char** argv) {
     for (size_t i=0; i< D*C; i++) static_k[i] = dist(rng);
 
     // save static tensor
-    save_f32_raw("static_v.bin",static_cast<const float*>(static_v), D*D);
+    save_f32_raw("static_v.bin",static_cast<const float*>(static_v), D*C);
     save_f32_raw("static_q.bin", static_cast<const float*>(static_q), D*C);
     save_f32_raw("static_k.bin", static_cast<const float*>(static_k), D*C);
 
-    if(!BuildOneGraph(backend, graph_kv, B, L, D, C, static_v, static_q, static_k, v_bytes, qk_bytes)){
-        std::cerr << "BuildOneGraph for kv graph failed\n";
-        return -1;
-    }
-    if(!BuildOneGraph(backend, graph_prefill, B, L, D, C, static_v, static_q, static_k, v_bytes, qk_bytes)){
+    if(!BuildOneGraph(backend, graph_prefill, false, B, L, D, C, static_v, static_q, static_k, v_bytes, qk_bytes)){
         std::cerr << "BuildOneGraph for prefill graph failed\n";
         return -1;
     }
+        std::cout << "Build Prefill Graph\n";
 
+    if(!BuildOneGraph(backend, graph_kv, true, B, L, D, C, static_v, static_q, static_k, v_bytes, qk_bytes)){
+        std::cerr << "BuildOneGraph for kv graph failed\n";
+        return -1;
+    }
+    std::cout << "Build KV Graph\n";
+    
     std::vector<uint8_t> blob;
     if (!ctx.GetBinary(blob)) return -1;
 
