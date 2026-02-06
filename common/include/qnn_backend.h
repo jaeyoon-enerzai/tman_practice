@@ -30,4 +30,5 @@ class QnnBackendRuntime{
     private:
     const QnnInterface_t* be_{nullptr};
     Qnn_BackendHandle_t backend_handle_{nullptr};
+    bool ConfigureOpPackagesFromEnv();
 };

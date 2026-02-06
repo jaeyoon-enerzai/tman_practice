@@ -40,7 +40,15 @@ adb pull /data/local/tmp/htprun/qnn.log output/qnn-profiling-data_0.log
 - Blockwise config
 
 ## Step11 - Add a customized op package
-- see QnnBackendCommon.cpp
+Goto TManOpPackage and then run following command
+
+```
+cd ${HEXAGON_SDK_ROOT}
+source setup_sdk_env.source
+cd ${QNN_SDK_ROOT}/bin
+source envsetup.sh
+make htp_x86 htp_v73
+```
 
 ## Step12 - Increase block layer number
 
