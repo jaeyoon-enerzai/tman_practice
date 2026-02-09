@@ -47,6 +47,7 @@ cd ${HEXAGON_SDK_ROOT}
 source setup_sdk_env.source
 cd ${QNN_SDK_ROOT}/bin
 source envsetup.sh
+cd TMANOpPackage_directory
 make htp_x86 htp_v73
 ```
 

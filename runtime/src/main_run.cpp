@@ -386,7 +386,7 @@ static bool PostProcessOneGraphRun(
   DumpAndSerializeProfiler(profiler, graph_name);
 
   // 3) cpu reference
-  const unsigned int B = 1, L = 30, D = 64, C = 128; // 너 기존 그대로 고정
+  const unsigned int B = 1, L = 30, D = 1024, C = 2048; // 너 기존 그대로 고정
   if (input_ptrs.empty() || input_ptrs[0] == nullptr) {
     std::cerr << "[QNN] input_ptrs[0] missing\n";
     return false;

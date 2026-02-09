@@ -22,7 +22,7 @@ class QnnGraphRuntime {
 public:
   QnnGraphRuntime(): // TODO - config가 아니라 일단 값을 박아넣었음
     htp_graph_cfg_(std::make_unique<QnnHtpGraphCustomConfigRuntime>(
-      /*vtcm_mb=*/2,
+      /*vtcm_mb=*/8,
       /*opt_level=*/3.0f,
       /*enable_dlbc=*/true
     )) {}
