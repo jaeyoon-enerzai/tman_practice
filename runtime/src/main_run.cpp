@@ -279,8 +279,7 @@ static bool ComputeCpuReference(
   if (!load_f32_raw("static_k.bin", static_k, (size_t)D * C)) return false;
   if (!load_f32_raw("static_v.bin", static_v, (size_t)D * C)) return false;
 
-  std::vector<float> wv, q, k, v, attn;
-  wv.resize((size_t)D * C);
+  std::vector<float> q, k, v, attn;
   q.resize((size_t)B * L * D);
   k.resize((size_t)B * L * D);
   v.resize((size_t)B * L * D);
@@ -292,39 +291,35 @@ static bool ComputeCpuReference(
       static_cast<const float*>(static_q.data()),
       q.data(), B, L, C, D, 1, true);
 
+  std::cout << "시발 q중앙값 : " << q[0] << ", " << q[1] << ", " << q[2] << "\n";
+
   batch_matmul_f32(
       reinterpret_cast<const float*>(x_ptr),
       static_cast<const float*>(static_k.data()),
       k.data(), B, L, C, D, 1, true);
+  std::cout << "시발 k중앙값 : " << k[0] << ", " << k[1] << ", " << k[2] << "\n";
 
-  if (!is_kv) {
-    // prefill: wv = static_v @ y, v = x @ wv
-    batch_matmul_f32(
-        static_cast<const float*>(static_v.data()),
-        reinterpret_cast<const float*>(y_ptr),
-        wv.data(), 1, D, C, C, 1, false);
+  std::vector<float> dequantw; // shape (C, D)
+  if(!load_f32_raw("w_dequant.bin", dequantw, (size_t)C * D)) return false;
 
-    batch_matmul_f32(
-        reinterpret_cast<const float*>(x_ptr),
-        static_cast<const float*>(wv.data()),
-        v.data(), B, L, C, D, 1, true);
-  } else {
-    // kv: v = x @ static_v
-    batch_matmul_f32(
-        reinterpret_cast<const float*>(x_ptr),
-        static_cast<const float*>(static_v.data()),
-        v.data(), B, L, C, D, 1, true);
-  }
-
+  batch_matmul_f32(
+    reinterpret_cast<const float*>(x_ptr),
+    dequantw.data(),
+    v.data(), B, L, C, D, 1, false
+  );
+  std::cout << "시발 v중앙값 : " << v[0] << ", " << v[1] << ", " << v[2] << "\n";
+  
   batch_matmul_f32(
       static_cast<const float*>(q.data()),
       static_cast<const float*>(k.data()),
       attn.data(), B, L, D, L, B, true);
+  std::cout << "시발 attn중앙값 : " << attn[0] << ", " << attn[1] << ", " << attn[2] << "\n";
 
   batch_matmul_f32(
       static_cast<const float*>(attn.data()),
       static_cast<const float*>(v.data()),
       ref.out.data(), B, L, L, D, B, false);
+  std::cout << "시발 ref_out중앙값 : " << ref.out[0] << ", " << ref.out[1] << ", " << ref.out[2] << "\n";
 
   return true;
 }
@@ -386,7 +381,8 @@ static bool PostProcessOneGraphRun(
   DumpAndSerializeProfiler(profiler, graph_name);
 
   // 3) cpu reference
-  const unsigned int B = 1, L = 30, D = 1024, C = 2048; // 너 기존 그대로 고정
+  const unsigned int L = is_kv ? 1 : 30;
+  const unsigned int B = 1, D = 1024, C = 2048; // 너 기존 그대로 고정
   if (input_ptrs.empty() || input_ptrs[0] == nullptr) {
     std::cerr << "[QNN] input_ptrs[0] missing\n";
     return false;
@@ -489,17 +485,17 @@ int main(int argc, char** argv){
     QnnGraphRuntime g_prefill, g_kv;
     g_prefill.SetRestoreMode(true);
     g_kv.SetRestoreMode(true);
-    if (!g_prefill.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), "prefill_forward")) {
-        std::cerr << "graphCreate for prefill failed\n";
-        return -1;
-    }
+    // if (!g_prefill.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), "prefill_forward")) {
+    //     std::cerr << "graphCreate for prefill failed\n";
+    //     return -1;
+    // }
 
     if (!g_kv.Create(qnn.Backend(), ctx.Handle(), profiler.GetProfiler(), "kv_forward")) {
         std::cerr << "graphCreate for kv failed\n";
         return -1;
     }
 
-    std::cout << "graphCreate OK. graph_handle for prefill=" << g_prefill.Handle() << " for kv= " << g_kv.Handle() << "\n";
+    // std::cout << "graphCreate OK. graph_handle for prefill=" << g_prefill.Handle() << " for kv= " << g_kv.Handle() << "\n";
 
     QnnMemManagerRuntime mem;
     mem.Init(qnn.Backend(), &ctx);
@@ -523,10 +519,10 @@ int main(int argc, char** argv){
     RunResult rr_prefill, rr_kv;
 
     // Preregister TODO - memRegister on runtime for now
-    if(!RunOneGraph("prefill_forward", qnn.Backend(), g_prefill.Handle(), backendcache, mem, sb, arena, profiler.GetProfiler(), rr_prefill)){
-        std::cerr << "Run prefill failed\n";
-        return -1;
-    }
+    // if(!RunOneGraph("prefill_forward", qnn.Backend(), g_prefill.Handle(), backendcache, mem, sb, arena, profiler.GetProfiler(), rr_prefill)){
+    //     std::cerr << "Run prefill failed\n";
+    //     return -1;
+    // }
     if(!RunOneGraph("kv_forward", qnn.Backend(), g_kv.Handle(), backendcache, mem, sb, arena, profiler.GetProfiler(), rr_kv)){
         std::cerr << "Run kv failed\n";
         return -1;
@@ -542,16 +538,17 @@ int main(int argc, char** argv){
         std::cerr << "[QNN] SerializeAfterExecute failed\n";
     }
 
-    if(!PostProcessOneGraphRun("prefill_forward", false, rr_prefill.input_ptrs,
-            rr_prefill.output_metas, rr_prefill.output_bufs, profiler)){
-        return -1;
-    }
+    // if(!PostProcessOneGraphRun("prefill_forward", false, rr_prefill.input_ptrs,
+    //         rr_prefill.output_metas, rr_prefill.output_bufs, profiler)){
+    //     return -1;
+    // }
 
     if(!PostProcessOneGraphRun("kv_forward", true, rr_kv.input_ptrs,
             rr_kv.output_metas, rr_kv.output_bufs, profiler)){
         return -1;
     }
 
+    std::cout << "[QNN] Releasing resources...\n";
     sb.ArenaDestroy(arena);
 
     std::cout << "[QNN] Done.\n";

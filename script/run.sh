@@ -15,5 +15,6 @@ adb push multi_graph.bin $WORKSP
 adb push static_q.bin $WORKSP
 adb push static_k.bin $WORKSP
 adb push static_v.bin $WORKSP
+adb push /workspace/m2048_k8192_g128/w_dequant.bin $WORKSP
 
 adb shell "cd /data/local/tmp/htprun && LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD ./qnn_runtime_runner"
