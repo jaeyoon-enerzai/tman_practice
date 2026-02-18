@@ -8,3 +8,4 @@ build_runtime
 *.log
 *.zip
 *.txt
+.cache
