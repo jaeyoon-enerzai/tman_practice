@@ -10,11 +10,13 @@ WORKSP=/data/local/tmp/htprun
 # adb push $QNN_SDK/lib/aarch64-android/libQnnSystem.so $WORKSP
 # adb push $QNN_SDK/lib/aarch64-android/libQnnModelDlc.so $WORKSP
 
-adb push ../build_runtime/runtime/qnn_runtime_runner  $WORKSP
-adb push multi_graph.bin $WORKSP
-adb push static_q.bin $WORKSP
-adb push static_k.bin $WORKSP
-adb push static_v.bin $WORKSP
-adb push /workspace/m2048_k8192_g128/w_dequant.bin $WORKSP
+adb -s b4a7bb34 push ../build_runtime/runtime/qnn_runtime_runner  $WORKSP
+adb -s b4a7bb34 push multi_graph.bin $WORKSP
+adb -s b4a7bb34 push static_q.bin $WORKSP
+adb -s b4a7bb34 push static_k.bin $WORKSP
+adb -s b4a7bb34 push static_v.bin $WORKSP
+adb -s b4a7bb34 push /workspace/quantizing/m2048_k8192_g128/w_dequant.bin $WORKSP
+adb -s b4a7bb34 push /workspace/quantizing/m2048_k8192_g128/w_unpacked.bin $WORKSP
+adb -s b4a7bb34 push /workspace/quantizing/m2048_k8192_g128/s_unpacked.bin $WORKSP
 
-adb shell "cd /data/local/tmp/htprun && LD_LIBRARY_PATH=$LD_LIBRARY_PATH:$PWD ./qnn_runtime_runner"
+adb -s b4a7bb34 shell 'cd /data/local/tmp/htprun && LD_LIBRARY_PATH=/data/local/tmp/htprun ./qnn_runtime_runner'

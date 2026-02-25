@@ -110,3 +110,8 @@ Operations in brackets are currently commented out — being incrementally enabl
 - **Op config version**: Uses v1. Access via `QNN_OP_VER_PTR(cfg)` macro.
 - **AOT uses clang++ with libc++** (`-stdlib=libc++`). Runtime uses NDK with `c++_static`.
 - **`OpHolder`** stores name, inputs, outputs, params by value. Call `bind()` after populating to wire up the `Qnn_OpConfig_t` pointers. The `MakeOpHolder` template takes a lambda for adding scalar params.
+
+## The way to explain the code
+
+Rather than using top-bottom way, (explaining the high level concept and then going deeper level) you should prefer to bottom-up way.
+That is, for a code you are going to explain, tell me what each part of the code (not necessarily line by line but should not be so large) is doing first and then summarize what the entire code is doing. It would be better if you take an example along with.

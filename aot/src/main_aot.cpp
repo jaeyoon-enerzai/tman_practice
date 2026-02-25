@@ -172,23 +172,48 @@ static bool BuildOneGraph(
   
   std::vector<uint32_t> flat_x_dims{B*L, C};
   std::vector<uint32_t> l_tns_dims{1, static_cast<uint32_t>(_get_l_size(C, GROUP_SIZE, !ADD_CONVERT))};
-  std::vector<uint32_t> v_qbit_dims{1, D * C / 2};
-  std::vector<uint32_t> scale_dims{1, D * C / BITS / GROUP_SIZE * 4};
-  std::vector<uint32_t> c_tns_dims{1, static_cast<uint32_t>(_get_c_size(D, BITS))};
+  // Align with hvx_preprocess_weights terminology
+  constexpr uint32_t VEC_P = 128;   // HVX vector register size in bytes
+  constexpr uint32_t G = 4;         // activation group size for LUT (g in utils.py)
+  uint32_t M = D;                   // output features
+  uint32_t K = C;                   // input features
+  uint32_t P = M * BITS;            // bit-plane expanded output dimension
+  uint32_t Q = K / G;               // number of LUT groups (= K / g)
+  uint32_t tile_p = VEC_P * BITS;   // P positions per AUTOSPLIT tile (= vec_p * bits = 512)
+
+  // 4D shapes for AUTOSPLIT: dim2 = num_tiles, sliced across HTP threads
+  // qweight: reshaped from (P/tile_p, -1) in int32 after nibble packing
+  //   total elements as uint8 = P * Q / 2  (2 = nibble packing: 2 indices per byte)
+  //   viewed as uint32 → P * Q / 2 / sizeof(uint32_t)
+  //   dim2 = P / tile_p = M * bits / (vec_p * bits) = M / vec_p
+  //   dim3 = (P * Q / 2 / sizeof(uint32_t)) / (P / tile_p)
+  uint32_t num_tiles = P / tile_p;                                           // 16
+  uint32_t qw_total_u32 = P * Q / 2 / (uint32_t)sizeof(uint32_t);           // 2,097,152
+  std::vector<uint32_t> v_qbit_dims{1, 1, num_tiles, qw_total_u32 / num_tiles};  // {1,1,16,131072}
+
+  // scales: (M, K/group_size) fp16 → tiled to (P/tile_p, -1) in int32
+  //   total fp16 elements = M * (K / GROUP_SIZE)
+  //   viewed as uint32 → M * (K / GROUP_SIZE) * sizeof(uint16_t) / sizeof(uint32_t)
+  //   dim2 = P / tile_p (same split as qweight)
+  uint32_t sc_total_u32 = M * (K / GROUP_SIZE) * (uint32_t)sizeof(uint16_t) / (uint32_t)sizeof(uint32_t);  // 65,536
+  std::vector<uint32_t> scale_dims{1, 1, num_tiles, sc_total_u32 / num_tiles};  // {1,1,16,4096}
+
+  // c_tns: output buffer = M * bits * sizeof(float) bytes, stored as uint8
+  std::vector<uint32_t> c_tns_dims{1, 1, 1, static_cast<uint32_t>(_get_c_size(D, BITS))}; // {1,1,1,32768}
 
   // ⚠️ 중요:
   // 같은 weight sharing을 노리면 wq/wk/wvprime 같은 STATIC 텐서는
   // 두 graph에서 "이름이 동일"해야 할 가능성이 매우 큼.
   // (지금은 일단 동일 name 유지)
   QnnTensor x("x",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, x_dims);
-  QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, y_dims);
+  // QnnTensor y("y",   QNN_TENSOR_TYPE_APP_WRITE, QNN_DATATYPE_FLOAT_32, y_dims);
 
-  QnnTensor wq("wq", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, weight_dims,
-               nullptr, qk_bytes, static_cast<const void*>(static_q));
-  QnnTensor wk("wk", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, weight_dims,
-               nullptr, qk_bytes, static_cast<const void*>(static_k));
-  QnnTensor wvprime("wvprime", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_8, v_qbit_dims,
-                    nullptr, D * C, static_cast<const void*>(static_v));
+  // QnnTensor wq("wq", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, weight_dims,
+              //  nullptr, qk_bytes, static_cast<const void*>(static_q));
+  // QnnTensor wk("wk", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_32, weight_dims,
+              //  nullptr, qk_bytes, static_cast<const void*>(static_k));
+  QnnTensor wvprime("wvprime", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, v_qbit_dims,
+                    nullptr, 0, static_cast<const void*>(static_v));  // bytes=0 → auto from dims×dtype
   std::unique_ptr<QnnTensor> wv_ptr, cast_x_ptr, l_tns_ptr, scale_ptr, c_tns_ptr, vflat_ptr, cast_v_ptr, flat_x_ptr;
   if(!is_kv){
     wv_ptr = std::make_unique<QnnTensor>(
@@ -202,26 +227,27 @@ static bool BuildOneGraph(
     cast_x_ptr = std::make_unique<QnnTensor>(
       "cast_x_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, flat_x_dims 
     );
-    l_tns_ptr = std::make_unique<QnnTensor>("l_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_UINT_8, l_tns_dims);
-    scale_ptr = std::make_unique<QnnTensor>("scale", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_FLOAT_16, scale_dims, nullptr, scale_bytes, static_cast<const void*>(static_sc));
-    c_tns_ptr = std::make_unique<QnnTensor>("c_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_UINT_8, c_tns_dims);
-    vflat_ptr = std::make_unique<QnnTensor>("vflat_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, flatten_o_dims);
-    cast_v_ptr = std::make_unique<QnnTensor>("cast_v_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, o_dims);
+    l_tns_ptr = std::make_unique<QnnTensor>("l_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_UINT_8, l_tns_dims);  // NATIVE: intermediate between precompute→linear
+    scale_ptr = std::make_unique<QnnTensor>("scale", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, scale_dims,
+                                            nullptr, 0, static_cast<const void*>(static_sc));  // bytes=0 → auto from dims×dtype
+    c_tns_ptr = std::make_unique<QnnTensor>("c_tns", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_UINT_8, c_tns_dims);  // APP_READ: new graph output
+    // vflat_ptr = std::make_unique<QnnTensor>("vflat_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, flatten_o_dims);
+    // cast_v_ptr = std::make_unique<QnnTensor>("cast_v_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, o_dims);
   }
 
-  QnnTensor q("q", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
-  QnnTensor qprime("qprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
-  QnnTensor k("k", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
-  QnnTensor kprime("kprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
-  QnnTensor v("v", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
-  QnnTensor attn("attn", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, attn_dims);
-  QnnTensor out("o", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, o_dims);
+  // QnnTensor q("q", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
+  // QnnTensor qprime("qprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
+  // QnnTensor k("k", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
+  // QnnTensor kprime("kprime", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, o_dims);
+  // QnnTensor v("v", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, o_dims);
+  // QnnTensor attn("attn", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, attn_dims);
+  // QnnTensor out("o", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_32, o_dims);
 
   // ---- Graph tensor 등록 ----
   if (!graph.EnsureTensorInGraph(x)) return false;
-  if (!graph.EnsureTensorInGraph(y)) return false;
-  if (!graph.EnsureTensorInGraph(wq)) return false;
-  if (!graph.EnsureTensorInGraph(wk)) return false;
+  // if (!graph.EnsureTensorInGraph(y)) return false;
+  // if (!graph.EnsureTensorInGraph(wq)) return false;
+  // if (!graph.EnsureTensorInGraph(wk)) return false;
   if (!graph.EnsureTensorInGraph(wvprime)) return false;
   if(!is_kv){
     if (!graph.EnsureTensorInGraph(*wv_ptr)) return false;
@@ -231,17 +257,17 @@ static bool BuildOneGraph(
     if (!graph.EnsureTensorInGraph(*l_tns_ptr)) return false;
     if (!graph.EnsureTensorInGraph(*scale_ptr)) return false;
     if (!graph.EnsureTensorInGraph(*c_tns_ptr)) return false;
-    if (!graph.EnsureTensorInGraph(*vflat_ptr)) return false;
-    if (!graph.EnsureTensorInGraph(*cast_v_ptr)) return false;
+    // if (!graph.EnsureTensorInGraph(*vflat_ptr)) return false;
+    // if (!graph.EnsureTensorInGraph(*cast_v_ptr)) return false;
 
   }
-  if (!graph.EnsureTensorInGraph(q)) return false;
-  if (!graph.EnsureTensorInGraph(qprime)) return false;
-  if (!graph.EnsureTensorInGraph(k)) return false;
-  if (!graph.EnsureTensorInGraph(kprime)) return false;
-  if (!graph.EnsureTensorInGraph(v)) return false;
-  if (!graph.EnsureTensorInGraph(attn)) return false;
-  if (!graph.EnsureTensorInGraph(out)) return false;
+  // if (!graph.EnsureTensorInGraph(q)) return false;
+  // if (!graph.EnsureTensorInGraph(qprime)) return false;
+  // if (!graph.EnsureTensorInGraph(k)) return false;
+  // if (!graph.EnsureTensorInGraph(kprime)) return false;
+  // if (!graph.EnsureTensorInGraph(v)) return false;
+  // if (!graph.EnsureTensorInGraph(attn)) return false;
+  // if (!graph.EnsureTensorInGraph(out)) return false;
 
   const char* kPackage = "qti.aisw";
 
@@ -252,10 +278,10 @@ static bool BuildOneGraph(
   // decoding : v = x * wvprime -> tmanlinear(x, wvprime)
   //     => cast_x = convert(x), l = precompute(x, scale), c = tmanlinear(l, w), out = finalize(c), cast_out = cast(out)
 
-  OpHolder matmul_q = MakeOpHolder("matmul_q", kPackage, "FullyConnected", x, &wq, nullptr, q,
-                                   [&](OpHolder& oh){ oh.addScalarB8("keep_dims", 0); });
-  OpHolder matmul_k = MakeOpHolder("matmul_k", kPackage, "FullyConnected", x, &wk, nullptr, k,
-                                   [&](OpHolder&){});
+  // OpHolder matmul_q = MakeOpHolder("matmul_q", kPackage, "FullyConnected", x, &wq, nullptr, q,
+  //                                  [&](OpHolder& oh){ oh.addScalarB8("keep_dims", 0); });
+  // OpHolder matmul_k = MakeOpHolder("matmul_k", kPackage, "FullyConnected", x, &wk, nullptr, k,
+  //                                  [&](OpHolder&){});
   OpHolder matmul_wv, matmul_v, reshape_x, cast_x, precompute, tmanlinear, finalize, reshape_v, cast_v;
   if(!is_kv){
     std::cout << "Temporaily removed value linear" << std::endl;
@@ -263,7 +289,7 @@ static bool BuildOneGraph(
     //                                  [&](OpHolder&){});
     // matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, wv_ptr.get(), nullptr, v,
     //                                [&](OpHolder& oh){ oh.addScalarB8("transpose_in1", 1); });
-    matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, &wq, nullptr, v, [&](OpHolder& oh){});
+    // matmul_v = MakeOpHolder("matmul_v", kPackage, "MatMul", x, &wq, nullptr, v, [&](OpHolder& oh){});
   } else{
     reshape_x = MakeOpHolder("reshape_x", kPackage, "Reshape", x, nullptr, nullptr, *flat_x_ptr, [&](OpHolder&){});
     cast_x = MakeOpHolder("cast_x", kPackage, "Cast", *flat_x_ptr.get(), nullptr, nullptr, *cast_x_ptr, [&](OpHolder&){});
@@ -278,23 +304,23 @@ static bool BuildOneGraph(
       oh.addScalarI32("bits", BITS);
       oh.addScalarI32("symmetric", SYMMETRIC);
     });
-    finalize = MakeOpHolder("finalize", "TMANOpPackage", "TMANFinalize", *c_tns_ptr.get(), nullptr, nullptr, *vflat_ptr.get(), [&](OpHolder& oh){
-      oh.addScalarI32("group_size", GROUP_SIZE);
-      oh.addScalarI32("bits", BITS);
-      oh.addScalarI32("symmetric", SYMMETRIC);
-    });
+    // finalize = MakeOpHolder("finalize", "TMANOpPackage", "TMANFinalize", *c_tns_ptr.get(), nullptr, nullptr, *vflat_ptr.get(), [&](OpHolder& oh){
+    //   oh.addScalarI32("group_size", GROUP_SIZE);
+    //   oh.addScalarI32("bits", BITS);
+    //   oh.addScalarI32("symmetric", SYMMETRIC);
+    // });
     
-    reshape_v = MakeOpHolder("reshape_v", kPackage, "Reshape", *vflat_ptr.get(), nullptr, nullptr, *cast_v_ptr.get(), [&](OpHolder&){});
-    cast_v = MakeOpHolder("cast_v", kPackage, "Cast", *cast_v_ptr.get(), nullptr, nullptr, v, [&](OpHolder&){});
+    // reshape_v = MakeOpHolder("reshape_v", kPackage, "Reshape", *vflat_ptr.get(), nullptr, nullptr, *cast_v_ptr.get(), [&](OpHolder&){});
+    // cast_v = MakeOpHolder("cast_v", kPackage, "Cast", *cast_v_ptr.get(), nullptr, nullptr, v, [&](OpHolder&){});
   }
-  OpHolder reshape_q = MakeOpHolder("reshape_q", kPackage, "Reshape", q, nullptr, nullptr, qprime,
-                                    [&](OpHolder&){});
-  OpHolder reshape_k = MakeOpHolder("reshape_k", kPackage, "Reshape", k, nullptr, nullptr, kprime,
-                                    [&](OpHolder&){});
-  OpHolder matmul_attn = MakeOpHolder("matmul_attn", kPackage, "MatMul", qprime, &kprime, nullptr, attn,
-                                      [&](OpHolder& oh){ oh.addScalarB8("transpose_in1", 1); });
-  OpHolder matmul_o = MakeOpHolder("matmul_o", kPackage, "MatMul", attn, &v, nullptr, out,
-                                   [&](OpHolder&){});
+  // OpHolder reshape_q = MakeOpHolder("reshape_q", kPackage, "Reshape", q, nullptr, nullptr, qprime,
+  //                                   [&](OpHolder&){});
+  // OpHolder reshape_k = MakeOpHolder("reshape_k", kPackage, "Reshape", k, nullptr, nullptr, kprime,
+  //                                   [&](OpHolder&){});
+  // OpHolder matmul_attn = MakeOpHolder("matmul_attn", kPackage, "MatMul", qprime, &kprime, nullptr, attn,
+  //                                     [&](OpHolder& oh){ oh.addScalarB8("transpose_in1", 1); });
+  // OpHolder matmul_o = MakeOpHolder("matmul_o", kPackage, "MatMul", attn, &v, nullptr, out,
+  //                                  [&](OpHolder&){});
 
   // ---- Validate + AddNode ----
   auto validate_and_add = [&](OpHolder& op, const char* tag) -> bool {
@@ -313,25 +339,26 @@ static bool BuildOneGraph(
     return true;
   };
 
-  if (!validate_and_add(matmul_q, "matmul_q")) return false;
-  if (!validate_and_add(matmul_k, "matmul_k")) return false;
+  // if (!validate_and_add(matmul_q, "matmul_q")) return false;
+  // if (!validate_and_add(matmul_k, "matmul_k")) return false;
   if(!is_kv){
     // if (!validate_and_add(matmul_wv, "matmul_wv")) return false;
-    if (!validate_and_add(matmul_v, "matmul_v")) return false;
+    // if (!validate_and_add(matmul_v, "matmul_v")) return false;
+    std::cout << "Prefill graph branch" << std::endl;
   } else{
     if (!validate_and_add(reshape_x, "reshape_x")) return false;
     if (!validate_and_add(cast_x, "cast_x")) return false;
     if (!validate_and_add(precompute, "precompute")) return false;
     if (!validate_and_add(tmanlinear, "tmanlinear")) return false;
-    if (!validate_and_add(finalize, "finalize")) return false;
-    if (!validate_and_add(reshape_v, "reshape_v")) return false;
-    if (!validate_and_add(cast_v, "cast_v")) return false;
+    // if (!validate_and_add(finalize, "finalize")) return false;
+    // if (!validate_and_add(reshape_v, "reshape_v")) return false;
+    // if (!validate_and_add(cast_v, "cast_v")) return false;
   }
-  if (!validate_and_add(reshape_q, "reshape_q")) return false;
-  if (!validate_and_add(reshape_k, "reshape_k")) return false;
-  if (!validate_and_add(matmul_attn, "matmul_attn")) return false;
+  // if (!validate_and_add(reshape_q, "reshape_q")) return false;
+  // if (!validate_and_add(reshape_k, "reshape_k")) return false;
+  // if (!validate_and_add(matmul_attn, "matmul_attn")) return false;
   // if (!validate_and_add(matmul_v, "matmul_v")) return false;
-  if (!validate_and_add(matmul_o, "matmul_o")) return false;
+  // if (!validate_and_add(matmul_o, "matmul_o")) return false;
 
   // ---- Finalize ----
   if (!graph.Finalize()) return false;
@@ -429,7 +456,7 @@ int main(int argc, char** argv) {
     unsigned int B = 1;
     unsigned int L = 1; // 일단
     unsigned int D = 2048;
-    unsigned int C = 2048;
+    unsigned int C = 8192;
     std::mt19937 rng(12345);
     std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
     unsigned int v_bytes = static_cast<uint32_t>(D * C * sizeof(uint8_t) / 2);
@@ -448,9 +475,9 @@ int main(int argc, char** argv) {
     save_f32_raw("static_k.bin", static_cast<const float*>(static_k), D*C);
 
     std::vector<uint8_t> static_v;
-    if(!load_raw("/workspace/m2048_k8192_g128/w_repacked.bin", static_v, D*C/2)) return -1;
+    if(!load_raw("/workspace/quantizing/m2048_k8192_g128/w_repacked.bin", static_v, D*C/2)) return -1;
     std::vector<uint8_t> static_sc;
-    if(!load_raw("/workspace/m2048_k8192_g128/s_repacked.bin", static_sc, D*C/BITS/GROUP_SIZE*4*2)) return -1;
+    if(!load_raw("/workspace/quantizing/m2048_k8192_g128/s_repacked.bin", static_sc, D*C/BITS/GROUP_SIZE*4*2)) return -1;
 
     // if(!BuildOneGraph(backend, graph_prefill, false, B, L, D, C, nullptr, nullptr, static_q, static_k, v_bytes, qk_bytes)){
     //     std::cerr << "BuildOneGraph for prefill graph failed\n";
