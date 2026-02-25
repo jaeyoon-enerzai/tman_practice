@@ -201,6 +201,9 @@ static bool BuildOneGraph(
   // c_tns: output buffer = M * bits * sizeof(float) bytes, stored as uint8
   std::vector<uint32_t> c_tns_dims{1, 1, 1, static_cast<uint32_t>(_get_c_size(D, BITS))}; // {1,1,1,32768}
 
+  // y_tns: TMANFinalize output, M fp16 values
+  std::vector<uint32_t> y_tns_dims{1, 1, 1, D};  // {1,1,1,2048} FP16 = 4096 bytes
+
   // ⚠️ 중요:
   // 같은 weight sharing을 노리면 wq/wk/wvprime 같은 STATIC 텐서는
   // 두 graph에서 "이름이 동일"해야 할 가능성이 매우 큼.
@@ -214,7 +217,7 @@ static bool BuildOneGraph(
               //  nullptr, qk_bytes, static_cast<const void*>(static_k));
   QnnTensor wvprime("wvprime", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, v_qbit_dims,
                     nullptr, 0, static_cast<const void*>(static_v));  // bytes=0 → auto from dims×dtype
-  std::unique_ptr<QnnTensor> wv_ptr, cast_x_ptr, l_tns_ptr, scale_ptr, c_tns_ptr, vflat_ptr, cast_v_ptr, flat_x_ptr;
+  std::unique_ptr<QnnTensor> wv_ptr, cast_x_ptr, l_tns_ptr, scale_ptr, c_tns_ptr, y_tns_ptr, vflat_ptr, cast_v_ptr, flat_x_ptr;
   if(!is_kv){
     wv_ptr = std::make_unique<QnnTensor>(
         "wv", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, v_dims
@@ -230,9 +233,8 @@ static bool BuildOneGraph(
     l_tns_ptr = std::make_unique<QnnTensor>("l_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_UINT_8, l_tns_dims);  // NATIVE: intermediate between precompute→linear
     scale_ptr = std::make_unique<QnnTensor>("scale", QNN_TENSOR_TYPE_STATIC, QNN_DATATYPE_UINT_32, scale_dims,
                                             nullptr, 0, static_cast<const void*>(static_sc));  // bytes=0 → auto from dims×dtype
-    c_tns_ptr = std::make_unique<QnnTensor>("c_tns", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_UINT_8, c_tns_dims);  // APP_READ: new graph output
-    // vflat_ptr = std::make_unique<QnnTensor>("vflat_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, flatten_o_dims);
-    // cast_v_ptr = std::make_unique<QnnTensor>("cast_v_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_16, o_dims);
+    c_tns_ptr = std::make_unique<QnnTensor>("c_tns", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_UINT_8, c_tns_dims);  // NATIVE: intermediate between TMANLinear→TMANFinalize
+    y_tns_ptr = std::make_unique<QnnTensor>("y_tns", QNN_TENSOR_TYPE_APP_READ, QNN_DATATYPE_FLOAT_16, y_tns_dims);  // APP_READ: finalize output (fp16)
   }
 
   // QnnTensor q("q", QNN_TENSOR_TYPE_NATIVE, QNN_DATATYPE_FLOAT_32, flatten_o_dims);
@@ -257,8 +259,7 @@ static bool BuildOneGraph(
     if (!graph.EnsureTensorInGraph(*l_tns_ptr)) return false;
     if (!graph.EnsureTensorInGraph(*scale_ptr)) return false;
     if (!graph.EnsureTensorInGraph(*c_tns_ptr)) return false;
-    // if (!graph.EnsureTensorInGraph(*vflat_ptr)) return false;
-    // if (!graph.EnsureTensorInGraph(*cast_v_ptr)) return false;
+    if (!graph.EnsureTensorInGraph(*y_tns_ptr)) return false;
 
   }
   // if (!graph.EnsureTensorInGraph(q)) return false;
@@ -304,11 +305,11 @@ static bool BuildOneGraph(
       oh.addScalarI32("bits", BITS);
       oh.addScalarI32("symmetric", SYMMETRIC);
     });
-    // finalize = MakeOpHolder("finalize", "TMANOpPackage", "TMANFinalize", *c_tns_ptr.get(), nullptr, nullptr, *vflat_ptr.get(), [&](OpHolder& oh){
-    //   oh.addScalarI32("group_size", GROUP_SIZE);
-    //   oh.addScalarI32("bits", BITS);
-    //   oh.addScalarI32("symmetric", SYMMETRIC);
-    // });
+    finalize = MakeOpHolder("finalize", "TMANOpPackage", "TMANFinalize", *c_tns_ptr.get(), nullptr, nullptr, *y_tns_ptr.get(), [&](OpHolder& oh){
+      oh.addScalarI32("group_size", GROUP_SIZE);
+      oh.addScalarI32("bits", BITS);
+      oh.addScalarI32("symmetric", SYMMETRIC);
+    });
     
     // reshape_v = MakeOpHolder("reshape_v", kPackage, "Reshape", *vflat_ptr.get(), nullptr, nullptr, *cast_v_ptr.get(), [&](OpHolder&){});
     // cast_v = MakeOpHolder("cast_v", kPackage, "Cast", *cast_v_ptr.get(), nullptr, nullptr, v, [&](OpHolder&){});
@@ -350,7 +351,7 @@ static bool BuildOneGraph(
     if (!validate_and_add(cast_x, "cast_x")) return false;
     if (!validate_and_add(precompute, "precompute")) return false;
     if (!validate_and_add(tmanlinear, "tmanlinear")) return false;
-    // if (!validate_and_add(finalize, "finalize")) return false;
+    if (!validate_and_add(finalize, "finalize")) return false;
     // if (!validate_and_add(reshape_v, "reshape_v")) return false;
     // if (!validate_and_add(cast_v, "cast_v")) return false;
   }

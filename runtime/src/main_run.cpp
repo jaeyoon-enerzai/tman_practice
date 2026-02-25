@@ -25,6 +25,7 @@
 #include "qnn_log.h"
 #include "precompute_ref.h"
 #include "tman_linear_ref.h"
+#include "tman_finalize_ref.h"
 
 template <typename T>
 static bool load_raw(const std::string& path, std::vector<T>& out, size_t numel) {
@@ -660,6 +661,135 @@ static void CompareLinearRef(
     std::cout << "=== End TMANLinear Comparison ===\n";
 }
 
+// Compare TMANFinalize CPU reference output with QNN y_tns output.
+//
+// Runs the full chain internally:
+//   precompute_ref → tman_linear_ref → tman_finalize_ref
+// Then compares the finalize fp16 output with QNN y_tns (fp16).
+static void CompareFinalizeRef(
+    const void* x_fp32_ptr,      // fp32 input activations, length K
+    const uint8_t* qnn_output,   // raw QNN y_tns output buffer (fp16)
+    size_t qnn_output_bytes,
+    int32_t gemm_m,              // = D = 2048
+    int32_t gemm_k,              // = C = 8192
+    int32_t bits,                // = 4
+    int32_t group_size           // = 128
+)
+{
+    std::cout << "=== TMANFinalize CPU Reference Comparison ===\n";
+    std::cout << "  gemm_m=" << gemm_m << " gemm_k=" << gemm_k
+              << " bits=" << bits << " group_size=" << group_size << "\n";
+
+    // Step 1: precompute_ref → l/ls/lb buffer
+    int32_t precompute_size = precompute_ref_bufsize(gemm_k, group_size);
+    std::vector<uint8_t> precompute_buf(precompute_size, 0);
+    precompute_ref(gemm_k, group_size,
+                   reinterpret_cast<const float*>(x_fp32_ptr),
+                   precompute_buf.data());
+    std::cout << "  precompute_ref done, bufsize=" << precompute_size << "\n";
+
+    // Step 2: Load unpacked weights and scales
+    const int32_t M = gemm_m;
+    const int32_t K = gemm_k;
+    const int32_t num_wgt_groups = K / group_size;
+
+    std::vector<uint8_t> w_unpacked;
+    if (!load_raw<uint8_t>("w_unpacked.bin", w_unpacked, (size_t)M * K)) {
+        std::cerr << "  Failed to load w_unpacked.bin\n";
+        return;
+    }
+    std::vector<uint16_t> s_unpacked;
+    if (!load_raw<uint16_t>("s_unpacked.bin", s_unpacked, (size_t)M * num_wgt_groups)) {
+        std::cerr << "  Failed to load s_unpacked.bin\n";
+        return;
+    }
+    std::cout << "  weights/scales loaded\n";
+
+    // Step 3: tman_linear_ref → float output (interleaved layout)
+    std::vector<float> linear_output(M * bits, 0.0f);
+    tman_linear_ref(gemm_m, gemm_k, bits, group_size,
+                    precompute_buf.data(),
+                    w_unpacked.data(),
+                    s_unpacked.data(),
+                    linear_output.data());
+
+    // Step 4: tman_finalize_ref → fp16 output (natural channel order)
+    std::vector<uint16_t> ref_fp16(M);
+    tman_finalize_ref(gemm_m, bits, linear_output.data(), ref_fp16.data());
+
+    // Step 5: Compare with QNN output (fp16)
+    const int32_t expected_bytes = M * (int32_t)sizeof(uint16_t);  // 4096
+    std::cout << "  qnn_output_bytes=" << qnn_output_bytes
+              << " expected=" << expected_bytes << " bytes\n";
+
+    if ((int32_t)qnn_output_bytes < expected_bytes) {
+        std::cerr << "  QNN output buffer too small!\n";
+        return;
+    }
+
+    const uint16_t* qnn_fp16 = reinterpret_cast<const uint16_t*>(qnn_output);
+
+    int32_t exact_match = 0;
+    float max_abs_diff = 0.0f;
+    float max_rel_diff = 0.0f;
+    int32_t max_abs_idx = 0;
+    double sum_abs_diff = 0.0;
+
+    for (int32_t i = 0; i < M; i++) {
+        float ref_val = tman_fp16_to_f32(ref_fp16[i]);
+        float qnn_val = tman_fp16_to_f32(qnn_fp16[i]);
+        float abs_diff = fabsf(ref_val - qnn_val);
+        sum_abs_diff += abs_diff;
+
+        if (ref_fp16[i] == qnn_fp16[i]) exact_match++;
+
+        if (abs_diff > max_abs_diff) {
+            max_abs_diff = abs_diff;
+            max_abs_idx = i;
+        }
+
+        float denom = std::max(fabsf(ref_val), fabsf(qnn_val));
+        if (denom > 1e-8f) {
+            float rel = abs_diff / denom;
+            if (rel > max_rel_diff) max_rel_diff = rel;
+        }
+    }
+
+    std::cout << "\n  [Result] " << exact_match << "/" << M << " exact match ("
+              << (100.0f * exact_match / M) << "%)\n";
+    std::cout << "  max_abs_diff=" << max_abs_diff << " at index " << max_abs_idx
+              << " (ref=" << tman_fp16_to_f32(ref_fp16[max_abs_idx])
+              << " qnn=" << tman_fp16_to_f32(qnn_fp16[max_abs_idx]) << ")\n";
+    std::cout << "  max_rel_diff=" << max_rel_diff << "\n";
+    std::cout << "  mean_abs_diff=" << (sum_abs_diff / M) << "\n";
+
+    int32_t show = std::min(M, (int32_t)16);
+    std::cout << "\n  First " << show << " values:\n";
+    for (int32_t i = 0; i < show; i++) {
+        float ref_val = tman_fp16_to_f32(ref_fp16[i]);
+        float qnn_val = tman_fp16_to_f32(qnn_fp16[i]);
+        std::cout << "    [" << i << "] ref=" << ref_val << " qnn=" << qnn_val
+                  << " diff=" << fabsf(ref_val - qnn_val) << "\n";
+    }
+
+    int32_t mismatch_shown = 0;
+    std::cout << "\n  First mismatches (abs_diff > 1e-2):\n";
+    for (int32_t i = 0; i < M && mismatch_shown < 16; i++) {
+        float ref_val = tman_fp16_to_f32(ref_fp16[i]);
+        float qnn_val = tman_fp16_to_f32(qnn_fp16[i]);
+        float diff = fabsf(ref_val - qnn_val);
+        if (diff > 1e-2f) {
+            std::cout << "    [" << i << "] ref=" << ref_val
+                      << " qnn=" << qnn_val << " diff=" << diff << "\n";
+            mismatch_shown++;
+        }
+    }
+    if (mismatch_shown == 0)
+        std::cout << "    (all within 1e-2 tolerance)\n";
+
+    std::cout << "=== End TMANFinalize Comparison ===\n";
+}
+
 static void DumpAndSerializeProfiler(
     QnnProfilerRuntime& profiler,
     const std::string& graph_name
@@ -714,15 +844,15 @@ static bool PostProcessOneGraphRun(
   std::cout << "IS KV? " << (is_kv ? "YES" : "NO") << "\n";
 
   if (is_kv) {
-    // l_tns is now NATIVE (intermediate), so output_bufs[0] = c_tns (TMANLinear output)
-    // c_tns: UINT_8, M * bits * sizeof(float) = 2048 * 4 * 4 = 32768 bytes of raw float data
+    // c_tns is now NATIVE (intermediate), output_bufs[0] = y_tns (TMANFinalize output)
+    // y_tns: FLOAT_16, M fp16 values = 2048 * 2 = 4096 bytes
     constexpr int32_t GEMM_M = D;   // 2048
     constexpr int32_t GEMM_K = C;   // 8192
     constexpr int32_t BITS = 4;
     constexpr int32_t GRP_SIZE = 128;
-    CompareLinearRef(
+    CompareFinalizeRef(
         input_ptrs[0],            // fp32 activations (length K = 8192 floats)
-        output_bufs[0].data(),    // QNN c_tns output
+        output_bufs[0].data(),    // QNN y_tns output (fp16)
         output_bufs[0].size(),
         GEMM_M, GEMM_K, BITS, GRP_SIZE);
   }
