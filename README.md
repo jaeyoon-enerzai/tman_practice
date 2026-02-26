@@ -51,6 +51,10 @@ cd TMANOpPackage_directory
 make htp_x86 htp_v73
 ```
 
+Finalize op has a bug
+- TmanLinear has tiling resulting in the tiled output in TCM while Finalize does not consider the tiling. Thus, Finalize tries to read tensor c in chunk from TCM but, I guess tiled output buffer in TCM does not locate in order. That's why the result from Finalize gets NaN which is caused by accessing uninitialized memory.
+- Change it by TMANFinalize.cpp in ModifiedOp
+
 ## Step12 - Increase block layer number
 
 ## Step13 - Visualize the graph
